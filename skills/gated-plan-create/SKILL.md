@@ -23,9 +23,8 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
 
 3. **Decide phases + conventions.** Group items into logical phases (cheap gates first, foundations
    before dependents). Pick and **set in the YAML top-level keys**: `base` (branch to cut from,
-   default `release`), `reviewTarget`/`reviewBase` (what codex reviews against, default the new
-   commit vs `main`), and any deliberate `excluded` choices. Surface only genuine forks to the user;
-   default the rest.
+   default `release`), `reviewBase` (what the final branch review compares against, default `main`),
+   and any deliberate `excluded` choices. Surface only genuine forks to the user; default the rest.
 
 4. **Split into commit-sized items.** This is the core skill. Each item is:
    - **independently committable** — touches one concern; doesn't half-break another,
@@ -51,8 +50,7 @@ title: <Title>
 goal: |
   <goal + baseline facts from step 2 — the numbers that justify the splits>
 base: release            # branch each phase is cut from
-reviewTarget: commit     # commit = new commit only (fast) | base = whole branch vs reviewBase
-reviewBase: main         # what `reviewTarget: base` compares against
+reviewBase: main         # the final branch-vs-base review compares against this (per-commit review is always the new commit)
 phases:
   - name: Phase 1 — <name>
     items:
