@@ -8,7 +8,7 @@ export const meta = {
 // args = {
 //   phaseTitle, branch, base='release',
 //   reviewTarget: 'commit'|'base' (default 'commit'), reviewBase='main', codexModel?, maxRounds=7,
-//   items: [{ label, prompt }]
+//   items: [{ label, prompt, gate }]   // gate = the runnable check (lint/typecheck/test) that must pass
 // }
 // args may arrive as an object or, depending on the harness, a JSON string — normalize both.
 const _args = typeof args === 'string' ? JSON.parse(args) : args || {}
@@ -24,7 +24,7 @@ const {
 } = _args
 
 if (!branch) throw new Error('args.branch is required (e.g. "phase/1-eslint")')
-if (!items.length) throw new Error('args.items must be a non-empty list of {label, prompt}')
+if (!items.length) throw new Error('args.items must be a non-empty list of {label, prompt, gate}')
 
 const modelFlag = codexModel ? ` -m ${codexModel}` : ''
 const REVIEW = {
@@ -35,6 +35,15 @@ const REVIEW = {
     p1: { type: 'array', items: { type: 'string' } },
     p2: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
+  },
+}
+const GATE = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['pass', 'detail'],
+  properties: {
+    pass: { type: 'boolean' },
+    detail: { type: 'string' },
   },
 }
 
@@ -64,8 +73,32 @@ for (const item of items) {
 
   let round = 0
   let blockers = []
+  let gateRed = false
   while (round < maxRounds) {
     round++
+
+    // Hard precondition: the committed HEAD must pass the item's own gate BEFORE we spend
+    // 4-8 min on codex. Re-run every round — a prior fix could have broken it.
+    if (item.gate) {
+      const g = await agent(
+        `On branch \`${branch}\` at HEAD, run the verification gate for "${item.label}" and report whether it passes. ` +
+          `Gate: ${item.gate}\n\nRun the exact command(s) it names (the project's lint/typecheck/test) and check exit status. ` +
+          `Return { pass, detail } where detail is the tail of the output (and which command failed, if any). Make NO edits and NO commits.`,
+        { label: `gate:${item.label}#${round}`, phase: phaseTitle, schema: GATE }
+      )
+      if (!g?.pass) {
+        gateRed = true
+        log(`✗ ${item.label}: gate RED round ${round} — fixing before codex`)
+        await agent(
+          `On branch \`${branch}\`, the gate for "${item.label}" is RED:\n\n${g?.detail || 'gate command failed'}\n\n` +
+            `Fix the code so the gate (${item.gate}) passes green — no suppression, no skipping tests — then commit. Change only what's needed.`,
+          { label: `gatefix:${item.label}#${round}`, phase: phaseTitle }
+        )
+        continue // re-verify the gate next round; codex does not run on a red gate
+      }
+      gateRed = false
+    }
+
     const review = await agent(
       `On branch \`${branch}\`, run this codex review and WAIT for it (slow, 4-8 min — Bash timeout 600000 ms):\n\n    ${reviewCmd}\n\n` +
         `codex prints findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
@@ -74,7 +107,7 @@ for (const item of items) {
     )
     blockers = [...(review?.p1 || []), ...(review?.p2 || [])]
     if (!blockers.length) {
-      log(`✓ ${item.label}: codex clean (round ${round})`)
+      log(`✓ ${item.label}: gate green + codex clean (round ${round})`)
       break
     }
     log(`↻ ${item.label}: ${blockers.length} blocker(s) round ${round} — fixing`)
@@ -84,7 +117,8 @@ for (const item of items) {
       { label: `fix:${item.label}#${round}`, phase: phaseTitle }
     )
   }
-  if (blockers.length) unresolved.push({ item: item.label, blockers })
+  if (gateRed) unresolved.push({ item: item.label, blockers: [`gate never green within ${maxRounds} rounds: ${item.gate}`] })
+  else if (blockers.length) unresolved.push({ item: item.label, blockers })
 }
 
 return { branch, itemsDone: items.length, unresolved }

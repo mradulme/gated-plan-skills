@@ -53,7 +53,10 @@ Skills load at session start — start a fresh Claude Code session after install
 
 ## How the review gate works
 
-For each item: an impl subagent commits the work, then a review subagent runs
+For each item: an impl subagent commits the work. Then, **before** any codex run, a read-only
+subagent re-runs the item's own `gate` (its `npm run lint` / `typecheck` / `test` command) on the
+committed HEAD — a hard precondition. A red gate is fixed and re-verified first, so codex never
+reviews a build that doesn't lint/typecheck/test green. Once the gate is green, a review subagent runs
 
 ```
 codex exec review --commit HEAD      # the new commit's diff only — fastest

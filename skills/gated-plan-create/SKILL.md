@@ -76,7 +76,13 @@ Rules the schema must satisfy (the executor relies on them):
 - Each item is **one commit**: a single `do` scope plus exactly one `gate`. No "and also" items that
   bundle unrelated changes — split them.
 - `do` is imperative and self-contained (the executor hands it straight to an impl subagent, which
-  does NOT re-read this file). `gate` is a runnable check that goes green.
+  does NOT re-read this file).
+- `gate` MUST be a **literal runnable check** — the executor actually runs it on the committed HEAD
+  as a hard precondition and only spawns the codex review once it passes. Name the exact command and
+  its pass condition (e.g. `` `npm run lint` → 0 errors ``, `` `npm test` green ``,
+  `` `npm run typecheck` → 0 ``). Prefer the project's standard lint/typecheck/test commands. A gate
+  that can't be run as a command (e.g. "looks good", "manually verify") defeats the precondition —
+  if a step is truly only checkable by eye, mark it `do`-only and say so, don't fake a gate.
 
 ## Guardrails
 - Measure before you split (step 2). Granularity must reflect real work, not padding.

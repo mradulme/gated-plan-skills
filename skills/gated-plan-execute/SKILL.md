@@ -27,8 +27,9 @@ to this file); this skill parses the YAML and drives it phase-by-phase.
    order, pausing for the merge decision (step 5) between each.
 
 3. **Build the items list** for that phase — one entry per item where `done` is not `true`:
-   `{ label: item.id, prompt: item.do + "\n\nGate: " + item.gate }`.
-   Skip items already marked `done: true`.
+   `{ label: item.id, prompt: item.do + "\n\nGate: " + item.gate, gate: item.gate }`.
+   Pass `gate` as its own field too — the workflow re-runs it on HEAD as a **hard precondition**
+   each round and only spawns codex once it's green (see below). Skip items already `done: true`.
 
 4. **Run the phase** via the bundled workflow (this is the explicit opt-in to call `Workflow`).
    Pass `args` as an actual JSON object, not a string:
@@ -52,6 +53,12 @@ to this file); this skill parses the YAML and drives it phase-by-phase.
    The workflow runs in the background and returns `{ branch, itemsDone, unresolved }`.
    `codex exec review` is slow (4–8 min/commit) — that's expected; `reviewTarget:'commit'`
    keeps each review's diff minimal. Do NOT shrink `maxRounds` below 2.
+
+   **Per-round gate precondition.** Each round the workflow first re-runs the item's `gate` on the
+   committed HEAD (a separate read-only agent — runs the lint/typecheck/test it names, edits nothing).
+   A red gate is fixed and re-verified *before* any codex run, so codex never reviews a build that
+   doesn't lint/typecheck/test green. An item whose gate never goes green within `maxRounds` lands in
+   `unresolved` with a `gate never green` blocker — it is never reported done.
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
