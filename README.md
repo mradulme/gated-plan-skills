@@ -6,11 +6,12 @@ review loop** until there are no P1/P2 findings.
 
 | Skill | Invoke | Does |
 |---|---|---|
-| `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan doc to `docs/plans/<name>.md`. |
+| `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. |
 | `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** via a subagent (one commit each), then runs `codex exec review` and loops fix→recommit→re-review until the commit is clean. |
 
-The two compose: **create → execute**. The only coupling is the doc format — `create` emits exactly
-what `execute` parses (`##` phases, `- [ ]` items with a bold `**C1**` label and a named gate).
+The two compose: **create → execute**. The only coupling is the YAML schema — `create` emits exactly
+what `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do` scope, a `gate`, and
+a `done` flag).
 
 ## Requirements
 
@@ -42,13 +43,13 @@ Skills load at session start — start a fresh Claude Code session after install
 
 ```
 /gated-plan-create add full test + lint + typecheck coverage to the app
-#   → writes docs/plans/<name>.md
+#   → writes docs/plans/<name>.yaml
 
-/gated-plan-execute docs/plans/<name>.md
+/gated-plan-execute docs/plans/<name>.yaml
 #   → runs phase 1 (branch, commit each item, codex-gated), reports, asks before the next phase
 ```
 
-`gated-plan-execute` skips already-checked `- [x]` items, so re-invoking **resumes**.
+`gated-plan-execute` skips items already marked `done: true`, so re-invoking **resumes**.
 
 ## How the review gate works
 
@@ -67,25 +68,40 @@ addresses them and recommits → re-review. Capped at `maxRounds` (default 3).
 > reviews only the new commit's diff, caps the rounds, and runs the whole thing in the background.
 > An optional `codexModel` arg lets you point the review at a faster model.
 
-## Plan doc format
+## Plan format
 
-```markdown
-# <Title> — commit-level execution checklist
-
-<goal + baseline facts; state base branch + review convention>
-
-## Phase 1 — <name> (<n> commits)
-- [ ] **C1** <imperative scope>. <files>. <gate, e.g. lint → 0 errors>
-- [ ] **C2** ...
-
-## Phase 2 — <name> (<n> commits)
-- [ ] **C3** ...
-
-## Deliberately excluded
-<choices, each with a one-line why>
+```yaml
+title: <Title>
+goal: |
+  <goal + baseline facts; the numbers that justify the splits>
+base: release            # branch each phase is cut from
+reviewTarget: commit     # commit = new commit only (fast) | base = whole branch vs reviewBase
+reviewBase: main
+phases:
+  - name: Phase 1 — <name>
+    items:
+      - id: C1            # unique across the doc; used for branch/commit/resume
+        done: false       # true only for already-done work the executor skips
+        do: |
+          <imperative scope — what to change and where>
+        gate: <command → expected, e.g. `npm run lint` → 0 errors>
+      - id: C2
+        done: false
+        do: |
+          ...
+        gate: ...
+  - name: Phase 2 — <name>
+    items:
+      - id: C3
+        done: false
+        do: |
+          ...
+        gate: ...
+excluded:
+  - <choices, each with a one-line why>
 ```
 
-Each box is one commit: independently committable, independently verifiable, small. Big buckets get
+Each item is one commit: independently committable, independently verifiable, small. Big buckets get
 split by shared root cause or unit of delivery.
 
 ## License

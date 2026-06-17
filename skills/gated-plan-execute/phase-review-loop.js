@@ -10,6 +10,8 @@ export const meta = {
 //   reviewTarget: 'commit'|'base' (default 'commit'), reviewBase='main', codexModel?, maxRounds=3,
 //   items: [{ label, prompt }]
 // }
+// args may arrive as an object or, depending on the harness, a JSON string — normalize both.
+const _args = typeof args === 'string' ? JSON.parse(args) : args || {}
 const {
   phaseTitle = 'Phase',
   branch,
@@ -19,7 +21,7 @@ const {
   codexModel,
   maxRounds = 3,
   items = [],
-} = args || {}
+} = _args
 
 if (!branch) throw new Error('args.branch is required (e.g. "phase/1-eslint")')
 if (!items.length) throw new Error('args.items must be a non-empty list of {label, prompt}')
