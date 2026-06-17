@@ -68,15 +68,12 @@ skill parses the YAML and drives it phase-by-phase.
    flagged returns in `branchUnresolved`.
 
    **OCR is primary; codex is the fallback (automatic).** OCR + GLM is the cheap Coding-Plan
-   subscription, so each review subagent runs OCR first
-   ([Alibaba open-code-review](https://github.com/alibaba/open-code-review), `npm i -g
-   @alibaba-group/open-code-review`) and, only if OCR/GLM is out of credits/quota/rate-limit, re-runs
-   the same review with `codex exec review --commit HEAD` / `--base <reviewBase>`. Both print text
-   findings, so the same classifier handles either. Point OCR at GLM via its env config (export once,
-   so keys never hit the transcript), using the **GLM Coding Plan key + coding endpoint** so it bills
-   the subscription, not pay-per-token: `OCR_LLM_URL` (GLM coding endpoint),
-   `OCR_LLM_TOKEN=$GLM_CODING_KEY`, `OCR_LLM_MODEL=glm-5.2`. The switch is automatic and costs nothing
-   while OCR is healthy.
+   subscription, so each review subagent runs OCR first and, only if OCR/GLM is out of
+   credits/quota/rate-limit, re-runs the same review with `codex exec review --commit HEAD` /
+   `--base <reviewBase>`. Both print text findings, so the same classifier handles either. The switch
+   is automatic and costs nothing while OCR is healthy. **Assume `ocr` is already installed and
+   configured against GLM** (env set out of band) — never prompt for or set its key/model/endpoint
+   during execution; the workflow only ever runs `ocr review ...`. One-time setup lives in the README.
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
