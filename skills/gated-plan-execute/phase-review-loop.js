@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially via a subagent, gate each commit on a review loop, then gate the whole branch vs main — review by codex, falling back to OCR+GLM when codex is out of quota',
+  description: 'Branch from base, do each checklist item sequentially via a subagent, gate each commit on a review loop, then gate the whole branch vs main — review tries Kimi, then GLM-5.2 (opencode), then codex, each on its coding plan',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -61,31 +61,41 @@ const GATE = {
   },
 }
 
-// Primary reviewer = OCR (Alibaba open-code-review) pointed at GLM via its own env config
-// (OCR_LLM_URL/TOKEN/MODEL — see SKILL.md) since GLM's Coding Plan is the cheap subscription;
-// fallback = codex. Both print findings as text, so one classifier handles either. The subagent
-// uses codex ONLY when OCR fails to review because its GLM credits/quota are exhausted.
-const reviewCmds = (target) =>
+// Ordered reviewer chain, tried in order until one produces a review. All three are AGENTIC — they
+// explore the repo with their own tools (run git, read files); we never hand them a pre-dumped diff.
+// All assumed preconfigured (logged in, on their coding plans — never set keys/models here). Each
+// prints findings as text, so one classifier handles all. The chain falls through to the next
+// reviewer ONLY when the current one can't review because it's out of credits/quota/rate-limit/auth:
+//   1. Kimi (its coding plan)    — native CLI: `kimi -p "<prompt>"`
+//   2. GLM-5.2 (its coding plan) — via opencode (no native CLI): `opencode run "<prompt>" -m zai-coding-plan/glm-5.2`
+//   3. codex (last resort, slow) — native, reviews git itself: `codex exec review --commit HEAD` / `--base <reviewBase>`
+const GLM_MODEL = 'zai-coding-plan/glm-5.2'
+const codexCmd = (target) =>
   target === 'branch'
-    ? {
-        primary: `ocr review --from ${reviewBase} --to ${branch}`,
-        fallback: `codex exec review --base ${reviewBase}${modelFlag} --color never`,
-      }
-    : {
-        primary: `ocr review --commit HEAD`,
-        fallback: `codex exec review --commit HEAD${modelFlag} --color never`,
-      }
+    ? `codex exec review --base ${reviewBase}${modelFlag}`
+    : `codex exec review --commit HEAD${modelFlag}`
 
 const reviewAgent = (target, label) => {
-  const { primary, fallback } = reviewCmds(target)
+  const scope =
+    target === 'branch'
+      ? `this branch vs \`${reviewBase}\` (the changes in \`git diff ${reviewBase}...HEAD\`)`
+      : `the latest commit (the changes in \`git diff HEAD~1 HEAD\`)`
+  // One agentic review instruction reused for kimi + opencode; codex has its own built-in review prompt.
+  const p =
+    `Review ${scope} for correctness. Run git and read the surrounding code as needed — investigate, ` +
+    `do not just skim the diff. List P1 (must-fix: bug, regression, security, data loss) and P2 ` +
+    `(correctness risk, missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
-    `On branch \`${branch}\`, review the ${target === 'branch' ? `whole branch against \`${reviewBase}\`` : 'latest commit'} ` +
-      `by running this:\n\n    ${primary}\n\n` +
-      `ONLY if that fails to produce a review because OCR/GLM is out of credits/quota/rate-limit ` +
-      `(NOT because it found issues, and NOT for any other error), run the fallback reviewer instead and classify ITS output ` +
-      `(codex is slow — WAIT for it, 4-8 min, Bash timeout 600000 ms):\n\n    ${fallback}\n\n` +
-      `Whichever runs prints findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) ` +
-      `and P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Return the structured result. Edit nothing.`,
+    `On branch \`${branch}\`, review ${scope}. Try these reviewers IN ORDER and classify the output of the ` +
+      `FIRST that produces a review. Move to the next ONLY if the current one fails because it is out of ` +
+      `credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). Each is ` +
+      `agentic — let it explore the repo; do not pre-dump the diff:\n\n` +
+      `  1. Kimi (coding plan):   kimi -p "${p}"\n` +
+      `  2. GLM via opencode:     opencode run "${p}" -m ${GLM_MODEL}\n` +
+      `  3. codex (last resort — slow, WAIT for it, 4-8 min, Bash timeout 600000 ms): ${codexCmd(target)}\n\n` +
+      `Assume all three are installed and logged in — do NOT configure keys/models. Whichever runs prints ` +
+      `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
+      `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Return the structured result. Edit nothing.`,
     { label, phase: phaseTitle, schema: REVIEW }
   )
 }

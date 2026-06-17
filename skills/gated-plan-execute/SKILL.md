@@ -1,14 +1,14 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, with each commit reviewed by OCR+GLM (falling back to `codex exec review` when OCR is out of credits) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with codex review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, with each commit reviewed by a reviewer chain (Kimi → GLM-5.2 via opencode → codex, each on its coding plan) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with codex review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
 
 Drive a commit-level plan YAML to done: per phase, branch from a base, do each item **sequentially**
 via a subagent (one commit each), gate every commit on a review loop until no P1/P2, then gate the
-**whole branch against `main`** before merge. Review is by OCR (Alibaba open-code-review) + GLM (the
-cheap Coding Plan), falling back to `codex exec review` when OCR/GLM is out of credits. The
+**whole branch against `main`** before merge. Review tries a chain of reviewers on their coding plans
+— **Kimi → GLM-5.2 (via opencode) → codex** — using the first that has quota. The
 deterministic loop lives in the bundled workflow `phase-review-loop.js` (next to this file); this
 skill parses the YAML and drives it phase-by-phase.
 
@@ -56,8 +56,8 @@ skill parses the YAML and drives it phase-by-phase.
 
    The workflow runs in the background and returns `{ branch, itemsDone, unresolved, branchUnresolved }`.
    The per-commit gate reviews only the new commit's diff to keep it minimal. Reviews run in the
-   background regardless; the codex *fallback* is slow (4–8 min/commit), OCR is faster. Do NOT shrink
-   `maxRounds` below 2.
+   background regardless; the codex *last resort* is slow (4–8 min/commit), Kimi/GLM are faster. Do NOT
+   shrink `maxRounds` below 2.
 
    **Per-round gate precondition.** Each round the workflow first re-runs the item's `gate` on the
    committed HEAD (a separate read-only agent — runs the lint/typecheck/test it names, edits nothing).
@@ -65,18 +65,26 @@ skill parses the YAML and drives it phase-by-phase.
    doesn't lint/typecheck/test green. An item whose gate never goes green within `maxRounds` lands in
    `unresolved` with a `gate never green` blocker — it is never reported done.
 
-   **Two review stages.** Per-commit (`ocr review --commit HEAD`) gates each commit inside the item
-   loop. After all items, a **final branch-vs-`reviewBase` review** (`ocr review --from <reviewBase>
-   --to <branch>`) runs to catch cross-commit interactions, loop-fixing up to 3 rounds; anything still
-   flagged returns in `branchUnresolved`.
+   **Two review stages.** Per-commit review gates each commit inside the item loop. After all items, a
+   **final branch-vs-`reviewBase` review** runs to catch cross-commit interactions, loop-fixing up to 3
+   rounds; anything still flagged returns in `branchUnresolved`.
 
-   **OCR is primary; codex is the fallback (automatic).** OCR + GLM is the cheap Coding-Plan
-   subscription, so each review subagent runs OCR first and, only if OCR/GLM is out of
-   credits/quota/rate-limit, re-runs the same review with `codex exec review --commit HEAD` /
-   `--base <reviewBase>`. Both print text findings, so the same classifier handles either. The switch
-   is automatic and costs nothing while OCR is healthy. **Assume `ocr` is already installed and
-   configured against GLM** (env set out of band) — never prompt for or set its key/model/endpoint
-   during execution; the workflow only ever runs `ocr review ...`. One-time setup lives in the README.
+   **Reviewer chain (cheap coding plans first, codex last).** Each review subagent tries reviewers in
+   order and classifies the first that produces a review, falling through to the next ONLY when the
+   current one is out of credits/quota/rate-limit/auth:
+
+   1. **Kimi** on its coding plan — native CLI: `kimi -p "<review prompt>"` (agentic; not `-y`/`--auto`,
+      which `-p` rejects).
+   2. **GLM-5.2** on its coding plan — via [opencode](https://github.com/sst/opencode) (GLM has no
+      native CLI): `opencode run "<review prompt>" -m zai-coding-plan/glm-5.2`.
+   3. **codex** (last resort, slow) — `codex exec review --commit HEAD` / `--base <reviewBase>` (no
+      `--color` flag — codex 0.139 rejects it; runs read-only/non-interactive by default).
+
+   All three are **agentic** — they run git and read surrounding code themselves; the workflow does
+   NOT pre-dump a diff into the prompt (that's the point of the chain — a real review, not a skim).
+   All print text findings, so one classifier handles all. **Assume all three are installed and logged
+   in on their plans** — never prompt for or set keys/models during execution; the workflow only
+   invokes the CLIs. One-time setup lives in the README.
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
@@ -94,7 +102,7 @@ skill parses the YAML and drives it phase-by-phase.
 - One item = one commit = one review gate; the branch then gets one final review vs `reviewBase`.
   Keep impl subagents scoped to a single item.
 - Sequential only (no parallel item agents) — they share the working tree.
-- The review subagent **runs the reviewer (OCR, or codex on credit fallback) and classifies**; it
+- The review subagent **runs the reviewer chain (Kimi → GLM/opencode → codex) and classifies**; it
   never edits. Fixes are a separate subagent.
 - Verify, don't assume: if a gate (`lint`/`typecheck`/`test`) isn't green, the item isn't done.
 - Surface blockers and merge/push decisions to the human; make only the small calls yourself.
