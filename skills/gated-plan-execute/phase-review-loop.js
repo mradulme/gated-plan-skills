@@ -61,42 +61,52 @@ const GATE = {
   },
 }
 
-// Ordered reviewer chain, tried in order until one produces a review. All three are AGENTIC — they
-// explore the repo with their own tools (run git, read files); we never hand them a pre-dumped diff.
-// All assumed preconfigured (logged in, on their coding plans — never set keys/models here). Each
-// prints findings as text, so one classifier handles all. The chain falls through to the next
-// reviewer ONLY when the current one can't review because it's out of credits/quota/rate-limit/auth:
-//   1. Kimi (its coding plan)    — native CLI: `kimi -p "<prompt>"`
-//   2. GLM-5.2 (its coding plan) — via opencode (no native CLI): `opencode run "<prompt>" -m zai-coding-plan/glm-5.2`
-//   3. codex (last resort, slow) — native, reviews git itself: `codex exec review --commit HEAD` / `--base <reviewBase>`
+// Ordered reviewer chain, tried in order until one produces a review. All are AGENTIC — each explores
+// the repo with its own tools (runs git, reads files); we never hand it a pre-dumped diff. All assumed
+// preconfigured (logged in / on their plans — never set keys/models here). Each prints findings as
+// text, so one classifier handles all. The chain falls through to the next reviewer ONLY when the
+// current one can't review because it's out of credits/quota/rate-limit/auth:
+//   1. codex       — native review:  codex exec review --commit HEAD / --base <reviewBase>
+//   2. GLM-5.2 (coding plan) — opencode run "<prompt>" -m zai-coding-plan/glm-5.2  (GLM has no native CLI)
+//   3. Kimi (coding plan)    — kimi -p "<prompt>"
+//   4. Claude (Sonnet) — claude -p --model claude-sonnet-4-6, read-only tool whitelist (LAST; spends main Claude credits)
+// Absolute paths: the review shell doesn't source ~/.zshrc, so bare names aren't all on PATH.
+const CODEX = '/opt/homebrew/bin/codex'
+const CLAUDE = '$HOME/.local/bin/claude'
+const KIMI = '$HOME/.kimi-code/bin/kimi'
+const OPENCODE = '$HOME/.opencode/bin/opencode'
 const GLM_MODEL = 'zai-coding-plan/glm-5.2'
 const codexCmd = (target) =>
   target === 'branch'
-    ? `codex exec review --base ${reviewBase}${modelFlag}`
-    : `codex exec review --commit HEAD${modelFlag}`
+    ? `${CODEX} exec review --base ${reviewBase}${modelFlag}`
+    : `${CODEX} exec review --commit HEAD${modelFlag}`
 
 const reviewAgent = (target, label) => {
-  const scope =
+  const scopeMd =
     target === 'branch'
       ? `this branch vs \`${reviewBase}\` (the changes in \`git diff ${reviewBase}...HEAD\`)`
       : `the latest commit (the changes in \`git diff HEAD~1 HEAD\`)`
-  // One agentic review instruction reused for kimi + opencode; codex has its own built-in review prompt.
+  const ref = target === 'branch' ? `${reviewBase}...HEAD` : 'HEAD~1 HEAD'
+  // Agentic review instruction reused for claude/kimi/opencode. NOTE: kept free of backticks, $ and
+  // double-quotes so it embeds safely inside the double-quoted shell arg below (no command substitution).
   const p =
-    `Review ${scope} for correctness. Run git and read the surrounding code as needed — investigate, ` +
-    `do not just skim the diff. List P1 (must-fix: bug, regression, security, data loss) and P2 ` +
-    `(correctness risk, missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
+    `Review ${target === 'branch' ? `this branch against ${reviewBase}` : 'the latest commit'} for ` +
+    `correctness. Run git (e.g. git diff ${ref}) and read the surrounding code as needed — investigate, ` +
+    `do not just skim. List P1 (must-fix: bug, regression, security, data loss) and P2 (correctness risk, ` +
+    `missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
-    `On branch \`${branch}\`, review ${scope}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
+    `On branch \`${branch}\`, review ${scopeMd}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
       `Run exactly ONE reviewer command per Bash call, WAIT for it to finish, then decide. NEVER run two ` +
       `reviewers in parallel — no parallel Bash calls. Classify the output of the FIRST that produces a ` +
       `review and STOP (do not run the others). Move to the next ONLY if the current one fails because it is ` +
-      `out of credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). The ` +
-      `binaries are at absolute paths below (the shell does not source ~/.zshrc) — use those paths verbatim. ` +
-      `Each is agentic — let it explore the repo; do not pre-dump the diff:\n\n` +
-      `  1. Kimi (coding plan):   $HOME/.kimi-code/bin/kimi -p "${p}"\n` +
-      `  2. GLM via opencode:     $HOME/.opencode/bin/opencode run "${p}" -m ${GLM_MODEL}\n` +
-      `  3. codex (last resort — slow, WAIT for it, 4-8 min, Bash timeout 600000 ms): ${codexCmd(target)}\n\n` +
-      `Assume all three are installed and logged in — do NOT configure keys/models. Whichever runs prints ` +
+      `out of credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). Use ` +
+      `the absolute paths verbatim (the shell does not source ~/.zshrc). Each is agentic — let it explore the ` +
+      `repo; do not pre-dump the diff:\n\n` +
+      `  1. codex (slow — WAIT for it, 4-8 min, Bash timeout 600000 ms): ${codexCmd(target)}\n` +
+      `  2. GLM via opencode (coding plan): ${OPENCODE} run "${p}" -m ${GLM_MODEL}\n` +
+      `  3. Kimi (coding plan):             ${KIMI} -p "${p}"\n` +
+      `  4. Claude Sonnet (LAST — spends main Claude credits): ${CLAUDE} -p "${p}" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"\n\n` +
+      `Assume all are installed and logged in — do NOT configure keys/models. Whichever runs prints ` +
       `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
       `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Return the structured result. Edit nothing.`,
     { label, phase: phaseTitle, schema: REVIEW }
