@@ -22,9 +22,12 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
    fake granularity.
 
 3. **Decide phases + conventions.** Group items into logical phases (cheap gates first, foundations
-   before dependents). Pick and **set in the YAML top-level keys**: `base` (branch to cut from,
-   default `release`), `reviewBase` (what the final branch review compares against, default `main`),
-   and any deliberate `excluded` choices. Surface only genuine forks to the user; default the rest.
+   before dependents). Give each phase a 1–2 line `intent` — what it achieves and how it builds
+   toward `goal` (the executor feeds `goal` + `intent` to every item subagent). Keep it about the
+   phase's role; don't restate the items' `do`. Pick and **set in the YAML top-level keys**: `base`
+   (branch to cut from, default `release`), `reviewBase` (what the final branch review compares
+   against, default `main`), and any deliberate `excluded` choices. Surface only genuine forks to the
+   user; default the rest.
 
 4. **Split into commit-sized items.** This is the core skill. Each item is:
    - **independently committable** — touches one concern; doesn't half-break another,
@@ -53,6 +56,8 @@ base: release            # branch each phase is cut from
 reviewBase: main         # the final branch-vs-base review compares against this (per-commit review is always the new commit)
 phases:
   - name: Phase 1 — <name>
+    intent: |             # 1-2 lines: what this phase achieves + how it builds toward `goal`. The
+      <why this phase>    # executor feeds it (with `goal`) to every item subagent for context.
     items:
       - id: C1            # unique label across the whole doc; used for branch/commit/resume
         done: false       # true only for already-done work

@@ -98,6 +98,8 @@ base: release            # branch each phase is cut from
 reviewBase: main         # the final branch-vs-base review compares against this
 phases:
   - name: Phase 1 — <name>
+    intent: |            # 1-2 lines: what this phase achieves + how it builds toward `goal`
+      <why this phase>   # fed (with `goal`) to every item subagent for context
     items:
       - id: C1            # unique across the doc; used for branch/commit/resume
         done: false       # true only for already-done work the executor skips

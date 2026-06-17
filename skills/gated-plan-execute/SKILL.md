@@ -20,9 +20,10 @@ skill parses the YAML and drives it phase-by-phase.
 ## Procedure
 
 1. **Read the YAML.** `Read` the referenced file and parse it as YAML. Top-level keys: `title`,
-   `goal`, `base`, `reviewBase`, `phases[]`, `excluded[]`. Each phase has `name` and
+   `goal`, `base`, `reviewBase`, `phases[]`, `excluded[]`. Each phase has `name`, `intent`, and
    `items[]`; each item has `id`, `done`, `do`, `gate`. Honor the doc's `base`/`reviewBase` over the
-   workflow defaults.
+   workflow defaults. `goal` and the phase `intent` are the bigger-picture context fed to each item
+   subagent (below).
 
 2. **Pick the target phase.** Default to the **first phase that still has an item with `done: false`**
    (so re-invoking resumes). If the user named a phase, use it. If they said "all", process phases in
@@ -41,6 +42,8 @@ skill parses the YAML and drives it phase-by-phase.
      scriptPath: '<absolute path to phase-review-loop.js beside this SKILL.md>',
      args: {
        phaseTitle: '<phase.name>',
+       goal: '<yaml goal>',                             // bigger-picture context for every item subagent
+       phaseIntent: '<phase.intent>',                   // how this phase fits the goal
        branch: 'phase/<n>-<kebab-of-phase-name>',
        base: '<yaml base, default release>',
        reviewBase: '<yaml reviewBase, default main>',   // the final branch gate reviews against this

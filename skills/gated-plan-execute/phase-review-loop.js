@@ -7,6 +7,7 @@ export const meta = {
 
 // args = {
 //   phaseTitle, branch, base='release',
+//   goal?, phaseIntent?,        // bigger-picture context prepended to each item's impl prompt
 //   reviewBase='main',          // the final branch review compares the branch against this
 //   codexModel?, maxRounds=7,   // maxRounds = per-commit rounds; the final branch gate uses BRANCH_MAX
 //   items: [{ label, prompt, gate }]   // gate = the runnable check (lint/typecheck/test) that must pass
@@ -15,6 +16,8 @@ export const meta = {
 const _args = typeof args === 'string' ? JSON.parse(args) : args || {}
 const {
   phaseTitle = 'Phase',
+  goal,
+  phaseIntent,
   branch,
   base = 'release',
   reviewBase = 'main',
@@ -22,6 +25,15 @@ const {
   maxRounds = 7,
   items = [],
 } = _args
+
+// Bigger-picture context prepended to each impl prompt so a subagent knows how its one item fits.
+const context = [
+  goal && `Bigger goal:\n${goal}`,
+  phaseIntent && `This phase — ${phaseTitle}:\n${phaseIntent}`,
+]
+  .filter(Boolean)
+  .join('\n\n')
+const contextBlock = context ? `${context}\n\n---\n\n` : ''
 
 if (!branch) throw new Error('args.branch is required (e.g. "phase/1-eslint")')
 if (!items.length) throw new Error('args.items must be a non-empty list of {label, prompt, gate}')
@@ -89,7 +101,7 @@ const unresolved = []
 
 for (const item of items) {
   await agent(
-    `You are on git branch \`${branch}\`. Implement EXACTLY this one checklist item, nothing else:\n\n${item.prompt}\n\n` +
+    `${contextBlock}You are on git branch \`${branch}\`. Implement EXACTLY this one checklist item, nothing else:\n\n${item.prompt}\n\n` +
       `Follow repo conventions (TDD where adding behavior). When the item is done AND its named gate is green ` +
       `(run the specific check it names — the project's lint/typecheck/test command), ` +
       `\`git add\` + \`git commit\` with a conventional message + the repo's Co-Authored-By trailer. ` +
