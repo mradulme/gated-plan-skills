@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially via a subagent, gate each commit on a review loop, then gate the whole branch vs main — review tries Kimi, then GLM-5.2 (opencode), then codex, each on its coding plan',
+  description: 'Branch from base, do each checklist item sequentially via a subagent, gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, then Kimi (cline for all but Claude), using the first with quota',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -9,7 +9,7 @@ export const meta = {
 //   phaseTitle, branch, base='release',
 //   goal?, phaseIntent?,        // bigger-picture context prepended to each item's impl prompt
 //   reviewBase='main',          // the final branch review compares the branch against this
-//   codexModel?, maxRounds=7,   // maxRounds = per-commit rounds; the final branch gate uses BRANCH_MAX
+//   maxRounds=7,                // maxRounds = per-commit rounds; the final branch gate uses BRANCH_MAX
 //   items: [{ label, prompt, gate }]   // gate = the runnable check (lint/typecheck/test) that must pass
 // }
 // args may arrive as an object or, depending on the harness, a JSON string — normalize both.
@@ -21,7 +21,6 @@ const {
   branch,
   base = 'release',
   reviewBase = 'main',
-  codexModel,
   maxRounds = 7,
   items = [],
 } = _args
@@ -39,7 +38,6 @@ if (!branch) throw new Error('args.branch is required (e.g. "phase/1-eslint")')
 if (!items.length) throw new Error('args.items must be a non-empty list of {label, prompt, gate}')
 
 const BRANCH_MAX = 3 // rounds for the final branch-vs-main gate
-const modelFlag = codexModel ? ` -m ${codexModel}` : ''
 
 const REVIEW = {
   type: 'object',
@@ -61,25 +59,22 @@ const GATE = {
   },
 }
 
-// Ordered reviewer chain, tried in order until one produces a review. All are AGENTIC — each explores
+// Reviewer FALLBACK order — exactly ONE reviewer runs per review; the next is tried ONLY if the
+// current one can't review. Not parallel, not stacked. All are AGENTIC — each explores
 // the repo with its own tools (runs git, reads files); we never hand it a pre-dumped diff. All assumed
-// preconfigured (logged in / on their plans — never set keys/models here). Each prints findings as
-// text, so one classifier handles all. The chain falls through to the next reviewer ONLY when the
-// current one can't review because it's out of credits/quota/rate-limit/auth:
-//   1. codex       — native review:  codex exec review --commit HEAD / --base <reviewBase>
-//   2. GLM-5.2 (coding plan) — opencode run "<prompt>" -m zai-coding-plan/glm-5.2  (GLM has no native CLI)
-//   3. Kimi (coding plan)    — kimi -p "<prompt>"
-//   4. Claude (Sonnet) — claude -p --model claude-sonnet-4-6, read-only tool whitelist (LAST; spends main Claude credits)
-// Absolute paths: the review shell doesn't source ~/.zshrc, so bare names aren't all on PATH.
-const CODEX = '/opt/homebrew/bin/codex'
+// preconfigured (cline providers logged in / claude logged in — never set keys/models here). Each
+// prints findings as text, so one classifier handles all. The chain falls through to the next reviewer
+// ONLY when the current one can't review because it's out of credits/quota/rate-limit/auth (for cline
+// this often shows up as an unauthenticated / not-logged-in / expired-token error — treat that as quota):
+//   1. gpt-5.5        — cline -p -P openai-codex    -m gpt-5.5
+//   2. GLM-5.2        — cline -p -P zai-coding-plan -m glm-5.2
+//   3. Claude (Sonnet)— claude -p --model claude-sonnet-4-6, read-only tool whitelist (spends main Claude credits)
+//   4. Kimi           — cline -p -P moonshot        -m kimi-k2.7-code  (LAST)
+// cline `-p` is PLAN MODE: it investigates but cannot edit (our read-only enforcement). claude `-p` is
+// print mode; its read-only comes from --allowedTools. Absolute paths: the review shell doesn't source
+// ~/.zshrc. No --json (it re-emits every event — token bloat); redirect to a temp file and tail it.
+const CLINE = '/opt/homebrew/bin/cline'
 const CLAUDE = '$HOME/.local/bin/claude'
-const KIMI = '$HOME/.kimi-code/bin/kimi'
-const OPENCODE = '$HOME/.opencode/bin/opencode'
-const GLM_MODEL = 'zai-coding-plan/glm-5.2'
-const codexCmd = (target) =>
-  target === 'branch'
-    ? `${CODEX} exec review --base ${reviewBase}${modelFlag}`
-    : `${CODEX} exec review --commit HEAD${modelFlag}`
 
 const reviewAgent = (target, label) => {
   const scopeMd =
@@ -87,7 +82,11 @@ const reviewAgent = (target, label) => {
       ? `this branch vs \`${reviewBase}\` (the changes in \`git diff ${reviewBase}...HEAD\`)`
       : `the latest commit (the changes in \`git diff HEAD~1 HEAD\`)`
   const ref = target === 'branch' ? `${reviewBase}...HEAD` : 'HEAD~1 HEAD'
-  // Agentic review instruction reused for claude/kimi/opencode. NOTE: kept free of backticks, $ and
+  // Unique per-review temp paths so concurrent plan runs can't cross-read each other's output
+  // (a stale/partial read could otherwise look like a clean review). slug from the review label.
+  const slug = label.replace(/[^a-z0-9]+/gi, '-')
+  const tmp = (n) => `/tmp/gpe-${slug}-${n}.txt`
+  // Agentic review instruction reused for all reviewers. NOTE: kept free of backticks, $ and
   // double-quotes so it embeds safely inside the double-quoted shell arg below (no command substitution).
   const p =
     `Review ${target === 'branch' ? `this branch against ${reviewBase}` : 'the latest commit'} for ` +
@@ -96,19 +95,29 @@ const reviewAgent = (target, label) => {
     `missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
     `On branch \`${branch}\`, review ${scopeMd}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
-      `Run exactly ONE reviewer command per Bash call, WAIT for it to finish, then decide. NEVER run two ` +
-      `reviewers in parallel — no parallel Bash calls. Classify the output of the FIRST that produces a ` +
-      `review and STOP (do not run the others). Move to the next ONLY if the current one fails because it is ` +
-      `out of credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). Use ` +
-      `the absolute paths verbatim (the shell does not source ~/.zshrc). Each is agentic — let it explore the ` +
-      `repo; do not pre-dump the diff:\n\n` +
-      `  1. codex (slow — WAIT for it, 4-8 min, Bash timeout 600000 ms): ${codexCmd(target)}\n` +
-      `  2. GLM via opencode (coding plan): ${OPENCODE} run "${p}" -m ${GLM_MODEL}\n` +
-      `  3. Kimi (coding plan):             ${KIMI} -p "${p}"\n` +
-      `  4. Claude Sonnet (LAST — spends main Claude credits): ${CLAUDE} -p "${p}" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"\n\n` +
-      `Assume all are installed and logged in — do NOT configure keys/models. Whichever runs prints ` +
+      `Run exactly ONE reviewer command per Bash call (Bash timeout 600000 ms), WAIT for it to finish, then ` +
+      `decide. NEVER run two reviewers in parallel — no parallel Bash calls. Each CLINE command (1, 2, 4) ` +
+      `redirects to its own temp file and tails it: read ONLY that tail (the final findings) — do NOT use ` +
+      `--json (it dumps the whole event stream); claude (3) prints its final answer directly, no redirect. ` +
+      `Classify the output of the FIRST that produces a review and STOP (do not run the others). ` +
+      `Move to the next ONLY if the current one fails because it cannot review — out of credits/quota/rate-limit, ` +
+      `OR (for cline) an auth / unauthenticated / not-logged-in / expired-or-invalid-token error, which is how ` +
+      `cline surfaces an exhausted plan (observed examples: a single-line "error: The usage limit has been ` +
+      `reached" or "error: Invalid Authentication", exit 1). Do NOT fall through because it found issues (that ` +
+      `is a valid review) or for any other error. cline runs in PLAN MODE (-p) so it investigates but cannot edit; claude is read-only ` +
+      `via --allowedTools. Use the absolute paths verbatim (the shell does not source ~/.zshrc). Each is agentic ` +
+      `— let it explore the repo; do not pre-dump the diff:\n\n` +
+      `  1. gpt-5.5:  ${CLINE} -p -P openai-codex -m gpt-5.5 "${p}" > ${tmp(1)} 2>&1; tail -n 120 ${tmp(1)}\n` +
+      `  2. GLM-5.2:  ${CLINE} -p -P zai-coding-plan -m glm-5.2 "${p}" > ${tmp(2)} 2>&1; tail -n 120 ${tmp(2)}\n` +
+      `  3. Claude Sonnet (spends main Claude credits): ${CLAUDE} -p "${p}" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"\n` +
+      `  4. Kimi (LAST): ${CLINE} -p -P moonshot -m kimi-k2.7-code "${p}" > ${tmp(4)} 2>&1; tail -n 120 ${tmp(4)}\n\n` +
+      `Assume all are configured and logged in — do NOT configure keys/models. Whichever runs prints ` +
       `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
-      `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Return the structured result. Edit nothing.`,
+      `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Edit nothing. If EVERY reviewer ` +
+      `fails (all out of quota/auth) and none produces a review, do NOT return an empty/clean result (empty p1/p2 ` +
+      `reads as a clean pass) — return a single P1 "NO REVIEWER AVAILABLE: all reviewers out of quota/auth — code ` +
+      `is UNREVIEWED, do not merge" so it surfaces as a blocker. Otherwise return the structured result from the ` +
+      `reviewer that ran.`,
     { label, phase: phaseTitle, schema: REVIEW }
   )
 }

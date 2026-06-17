@@ -1,6 +1,6 @@
 ---
 name: gated-plan-create
-description: Turn a task/spec into a commit-level plan YAML that `gated-plan-execute` can run. Use when the user wants to plan work as a checklist of small, independently-shippable commits grouped into phases — each item naming its verification gate — for codex-gated execution. Triggers on "create a gated plan", "plan this for gated execution", "write a commit-by-commit plan", "/gated-plan-create <task>". Pairs with `gated-plan-execute`, which consumes the YAML this skill writes.
+description: Turn a task/spec into a commit-level plan YAML that `gated-plan-execute` can run. Use when the user wants to plan work as a checklist of small, independently-shippable commits grouped into phases — each item naming its verification gate — for review-gated execution. Triggers on "create a gated plan", "plan this for gated execution", "write a commit-by-commit plan", "/gated-plan-create <task>". Pairs with `gated-plan-execute`, which consumes the YAML this skill writes.
 ---
 
 # gated-plan-create
@@ -89,7 +89,7 @@ Rules the schema must satisfy (the executor relies on them):
 - `do` is imperative and self-contained (the executor hands it straight to an impl subagent, which
   does NOT re-read this file).
 - `gate` MUST be a **literal runnable check** — the executor actually runs it on the committed HEAD
-  as a hard precondition and only spawns the codex review once it passes. Name the exact command and
+  as a hard precondition and only spawns the review once it passes. Name the exact command and
   its pass condition (e.g. `` `npm run lint` → 0 errors ``, `` `npm test` green ``,
   `` `npm run typecheck` → 0 ``). Prefer the project's standard lint/typecheck/test commands. A gate
   that can't be run as a command (e.g. "looks good", "manually verify") defeats the precondition —

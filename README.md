@@ -1,15 +1,16 @@
 # gated-plan-skills
 
 Two paired [Claude Code](https://claude.com/claude-code) skills for shipping work as a series of
-small, independently-verifiable commits — each one **gated by an AI code-review loop** that tries a
-chain of reviewers ([codex](https://github.com/openai/codex) → GLM-5.2 via
-[opencode](https://github.com/sst/opencode) → Kimi → Claude Sonnet, using the first with quota) until
-there are no P1/P2 findings.
+small, independently-verifiable commits — each one **gated by an AI code-review loop**. One reviewer
+runs per review, picked by fallback order (gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, using the first
+with quota), looping until there are no P1/P2 findings. All but Claude run through the
+[cline CLI](https://docs.cline.bot/usage/cli-overview); Claude uses the
+[Claude Code CLI](https://code.claude.com/docs/en/cli-reference).
 
 | Skill | Invoke | Does |
 |---|---|---|
 | `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. |
-| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** via a subagent (one commit each), reviews via the reviewer chain (codex → GLM-5.2/opencode → Kimi → Claude Sonnet) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
+| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** via a subagent (one commit each), reviews via one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
 
 The two compose: **create → execute**. The only coupling is the YAML schema — `create` emits exactly
 what `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do` scope, a `gate`, and
@@ -17,18 +18,18 @@ a `done` flag).
 
 ## Requirements
 
-- [Claude Code](https://claude.com/claude-code).
-- The reviewer chain for `gated-plan-execute`, each **installed and logged in** (not needed for
-  `gated-plan-create`). The chain is tried in order, using the first with quota:
-  1. [`codex`](https://github.com/openai/codex), authenticated.
-  2. [`opencode`](https://github.com/sst/opencode) configured to use **GLM-5.2** on Z.ai's coding
-     plan (GLM has no native CLI).
-  3. [`kimi`](https://github.com/MoonshotAI/kimi-cli) — Kimi's native CLI, on its coding plan.
-  4. [`claude`](https://claude.com/claude-code) — uses `claude -p --model claude-sonnet-4-6` (last;
-     spends your main Claude credits).
+- [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) (`claude`) — logged in. Used both
+  to run the skills and as the Claude Sonnet reviewer.
+- [cline CLI](https://docs.cline.bot/usage/cli-overview) — **installed with these providers
+  configured** (`cline auth`), not needed for `gated-plan-create`. The reviewers for
+  `gated-plan-execute` use exactly one of these per review, picked by fallback order (first with quota):
+  1. `cline -p -P openai-codex -m gpt-5.5`
+  2. `cline -p -P zai-coding-plan -m glm-5.2`
+  3. `claude -p --model claude-sonnet-4-6` (Claude Code CLI; spends your main Claude credits)
+  4. `cline -p -P moonshot -m kimi-k2.7-code` (last)
 
-  The skill never sets keys/models; it assumes these are preconfigured, and invokes each by absolute
-  path (the review shell doesn't source `~/.zshrc`).
+  The skill never sets keys/models; it assumes cline's providers and `claude` are preconfigured, and
+  invokes each by absolute path (the review shell doesn't source `~/.zshrc`).
 - `git` (work happens on real branches/commits).
 
 ## Install
@@ -67,32 +68,38 @@ Skills load at session start — start a fresh Claude Code session after install
 For each item: an impl subagent commits the work. Then, **before** any review, a read-only
 subagent re-runs the item's own `gate` (its `npm run lint` / `typecheck` / `test` command) on the
 committed HEAD — a hard precondition. A red gate is fixed and re-verified first, so the reviewer never
-sees a build that doesn't lint/typecheck/test green. Once the gate is green, a review subagent runs the
-**reviewer chain** over the new commit, one at a time in order, using the first with quota. All are
-**agentic** — they run git and read the code themselves (not a diff dumped into a prompt):
+sees a build that doesn't lint/typecheck/test green. Once the gate is green, a review subagent runs
+**one reviewer** over the new commit — tried in fallback order, one at a time, using the first with
+quota (never two at once). All are **agentic** — they run git and read the code themselves (not a diff
+dumped into a prompt):
 
 ```
-1. codex exec review --commit HEAD                            # slow
-2. opencode run "<prompt>" -m zai-coding-plan/glm-5.2          # GLM-5.2, Z.ai coding plan
-3. kimi -p "<prompt>"                                          # Kimi coding plan
-4. claude -p "<prompt>" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" Read Grep Glob   # last; main credits
+1. cline -p -P openai-codex   -m gpt-5.5         "<prompt>"    # gpt-5.5
+2. cline -p -P zai-coding-plan -m glm-5.2        "<prompt>"    # GLM-5.2, Z.ai coding plan
+3. claude -p "<prompt>" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" Read Grep Glob   # main credits
+4. cline -p -P moonshot       -m kimi-k2.7-code  "<prompt>"    # last
 ```
+
+`cline -p` runs in plan mode — it investigates but can't edit (cline's read-only equivalent of
+Claude's `--allowedTools`). cline output is redirected to a temp file and the tail is read (no
+`--json` — it would dump the whole event stream).
 
 It reads the findings and returns them classified as **P1** (must-fix: bug, regression, security,
 data loss, broken gate) / **P2** (should-fix) / ignore (nits, style). Any P1/P2 → a fix subagent
 addresses them and recommits → re-review. Capped at `maxRounds` (default 7).
 
 After every item in the phase is clean, one **final review of the whole branch against `reviewBase`**
-(same chain, against `git diff main...HEAD` / `codex exec review --base main`) runs to catch
-cross-commit interactions the per-commit gates can't see, loop-fixing up to 3 rounds. Anything still
-open lands in `branchUnresolved`, surfaced before the merge decision.
+(same fallback order, against `git diff main...HEAD`) runs to catch cross-commit interactions the
+per-commit gates can't see, loop-fixing up to 3 rounds. Anything still open lands in
+`branchUnresolved`, surfaced before the merge decision.
 
-A reviewer is skipped to the next **only** when it's out of credits/quota/rate-limit/auth — not when
-it finds issues. All print text findings, so one classifier handles them all.
+A reviewer falls through to the next **only** when it can't review — out of credits/quota/rate-limit,
+or (for cline) an auth/unauthenticated/expired-token error, which is how cline surfaces an exhausted
+plan — not when it finds issues. If every reviewer is out of quota, the review returns a P1
+"NO REVIEWER AVAILABLE" rather than a silent clean pass. All print text findings, so one classifier
+handles them all.
 
-> codex (tried first) is thorough but **slow** (~4–8 min per commit); GLM/Kimi are faster. Either
-> way the per-commit gate reviews only the new commit's diff, caps the rounds, and runs in the
-> background. An optional `codexModel` arg points the codex step at a faster model.
+> The per-commit gate reviews only the new commit's diff, caps the rounds, and runs in the background.
 
 ## Plan format
 
