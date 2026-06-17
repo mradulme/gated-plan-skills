@@ -62,7 +62,7 @@ codex exec review --commit HEAD      # the new commit's diff only — fastest
 
 reads codex's findings, and returns them classified as **P1** (must-fix: bug, regression, security,
 data loss, broken gate) / **P2** (should-fix) / ignore (nits, style). Any P1/P2 → a fix subagent
-addresses them and recommits → re-review. Capped at `maxRounds` (default 3).
+addresses them and recommits → re-review. Capped at `maxRounds` (default 7).
 
 > `codex exec review` is thorough but **slow** (~4–8 min per commit). Defaults are tuned for this:
 > reviews only the new commit's diff, caps the rounds, and runs the whole thing in the background.

@@ -42,7 +42,7 @@ to this file); this skill parses the YAML and drives it phase-by-phase.
        base: '<yaml base, default release>',
        reviewTarget: '<yaml reviewTarget, default commit>',   // 'base' = full branch vs reviewBase (slower)
        reviewBase: '<yaml reviewBase, default main>',
-       maxRounds: 3,
+       maxRounds: 7,
        // codexModel: '<faster model>',   // optional speed knob
        items: [ /* from step 3 */ ]
      }

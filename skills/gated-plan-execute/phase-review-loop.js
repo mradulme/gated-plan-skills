@@ -7,7 +7,7 @@ export const meta = {
 
 // args = {
 //   phaseTitle, branch, base='release',
-//   reviewTarget: 'commit'|'base' (default 'commit'), reviewBase='main', codexModel?, maxRounds=3,
+//   reviewTarget: 'commit'|'base' (default 'commit'), reviewBase='main', codexModel?, maxRounds=7,
 //   items: [{ label, prompt }]
 // }
 // args may arrive as an object or, depending on the harness, a JSON string — normalize both.
@@ -19,7 +19,7 @@ const {
   reviewTarget = 'commit',
   reviewBase = 'main',
   codexModel,
-  maxRounds = 3,
+  maxRounds = 7,
   items = [],
 } = _args
 
