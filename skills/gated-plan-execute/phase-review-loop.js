@@ -86,12 +86,15 @@ const reviewAgent = (target, label) => {
     `do not just skim the diff. List P1 (must-fix: bug, regression, security, data loss) and P2 ` +
     `(correctness risk, missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
-    `On branch \`${branch}\`, review ${scope}. Try these reviewers IN ORDER and classify the output of the ` +
-      `FIRST that produces a review. Move to the next ONLY if the current one fails because it is out of ` +
-      `credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). Each is ` +
-      `agentic — let it explore the repo; do not pre-dump the diff:\n\n` +
-      `  1. Kimi (coding plan):   kimi -p "${p}"\n` +
-      `  2. GLM via opencode:     opencode run "${p}" -m ${GLM_MODEL}\n` +
+    `On branch \`${branch}\`, review ${scope}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
+      `Run exactly ONE reviewer command per Bash call, WAIT for it to finish, then decide. NEVER run two ` +
+      `reviewers in parallel — no parallel Bash calls. Classify the output of the FIRST that produces a ` +
+      `review and STOP (do not run the others). Move to the next ONLY if the current one fails because it is ` +
+      `out of credits/quota/rate-limit/auth (NOT because it found issues, and NOT for any other error). The ` +
+      `binaries are at absolute paths below (the shell does not source ~/.zshrc) — use those paths verbatim. ` +
+      `Each is agentic — let it explore the repo; do not pre-dump the diff:\n\n` +
+      `  1. Kimi (coding plan):   $HOME/.kimi-code/bin/kimi -p "${p}"\n` +
+      `  2. GLM via opencode:     $HOME/.opencode/bin/opencode run "${p}" -m ${GLM_MODEL}\n` +
       `  3. codex (last resort — slow, WAIT for it, 4-8 min, Bash timeout 600000 ms): ${codexCmd(target)}\n\n` +
       `Assume all three are installed and logged in — do NOT configure keys/models. Whichever runs prints ` +
       `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
