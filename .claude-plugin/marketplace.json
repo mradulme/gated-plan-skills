@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "gated-plan-skills",
+  "description": "Codex-gated, commit-by-commit planning and execution skills for Claude Code.",
+  "owner": { "name": "mradulme", "url": "https://github.com/mradulme" },
+  "plugins": [
+    {
+      "name": "gated-plan-skills",
+      "description": "Two paired skills: gated-plan-create writes a commit-level plan doc; gated-plan-execute runs it phase-by-phase with a codex review gate per commit.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
