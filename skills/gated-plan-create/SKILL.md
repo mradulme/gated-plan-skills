@@ -11,8 +11,10 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
 
 ## Procedure
 
-1. **Understand the task.** If the ask is fuzzy or design-level, run the `brainstorming` skill
-   first. Don't plan past real ambiguity — ask.
+1. **Understand the task — and question it.** If the ask is fuzzy or design-level, run the
+   `brainstorming` skill first. Don't plan past real ambiguity — ask. Then apply YAGNI at the plan
+   level: if part of the ask is speculative ("might need…", "for later"), plan only what's needed
+   now and list the rest under `excluded`. The best commit is the one never written.
 
 2. **Get ground truth, don't guess.** Run the relevant read-only diagnostics so item sizing is
    real, not imagined: counts and concrete lists (e.g. `tsc --noEmit | grep -c error`, the failing
@@ -32,6 +34,12 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
      **shared root cause** (e.g. "120 type errors → 6 clusters by the module they live in") or by
      **unit of delivery** (e.g. "a new feature → one capability per commit, then one e2e flow per
      commit"). If you can't name the gate, the item is too vague.
+   - **lazy** — each item must earn its place. Run it up the ladder before it goes in the plan:
+     does it need to exist at all? does the stdlib / a native platform feature / an already-installed
+     dep cover it before any new code? is the scope the shortest diff that works, deletion before
+     addition? Stop at the first rung that holds. Drop items that don't survive — the right plan is
+     the **fewest commits that ship the goal**, not the most granular. Granularity (above) is for
+     real work measured in step 2; it is never padding.
 
 5. **Write the YAML** in the schema below to `docs/plans/<kebab-name>.yaml`. Then tell the user to
    run `gated-plan-execute docs/plans/<file>.yaml`. Don't start implementing — this skill only plans.
@@ -86,6 +94,8 @@ Rules the schema must satisfy (the executor relies on them):
 
 ## Guardrails
 - Measure before you split (step 2). Granularity must reflect real work, not padding.
+- Fewest items that ship the goal. An item that fails the ladder (step 4 **lazy**) — speculative,
+  reinventing an existing tool, or a bigger diff than the job needs — shouldn't be in the plan.
 - Order for dependencies: if Phase B needs a script/type/flag from Phase A, A comes first.
 - List deliberate simplifications under `excluded` — a skipped thing named is a decision; unnamed is
   a gap.
