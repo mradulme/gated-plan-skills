@@ -1,11 +1,11 @@
 {
   "name": "gated-plan-skills",
   "version": "0.3.0",
-  "description": "Plan work as a checklist of small commits, then execute it phase-by-phase with each commit gated by a codex review loop until no P1/P2.",
+  "description": "Plan work as a checklist of small commits, then execute it phase-by-phase with each commit gated by an AI code-review loop until no P1/P2.",
   "author": { "name": "mradulme", "url": "https://github.com/mradulme" },
   "homepage": "https://github.com/mradulme/gated-plan-skills",
   "repository": "https://github.com/mradulme/gated-plan-skills",
   "license": "MIT",
-  "keywords": ["planning", "code-review", "codex", "workflow", "skills", "claude-code"],
+  "keywords": ["planning", "code-review", "cline", "workflow", "skills", "claude-code"],
   "skills": "./skills/"
 }
