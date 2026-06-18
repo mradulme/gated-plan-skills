@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode; on a quota/auth miss it falls through to the next model in the same stage so an unavailable model never blocks the item), gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, then Kimi (cline for all but Claude), using the first with quota',
+  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the difficulty-matched coding agent (intelligence ladder kimi → minimax → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode; on a quota/auth miss it falls through to the next model in the same stage so an unavailable model never blocks the item), gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, MiniMax-M3, then Kimi (cline for all but Claude), using the first with quota',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -70,29 +70,37 @@ const GATE = {
 //   1. gpt-5.5        — cline -p -P openai-codex    -m gpt-5.5
 //   2. GLM-5.2        — cline -p -P zai-coding-plan -m glm-5.2
 //   3. Claude (Sonnet)— claude -p --model claude-sonnet-4-6, read-only tool whitelist (spends main Claude credits)
-//   4. Kimi           — cline -p -P moonshot        -m kimi-k2.7-code  (LAST)
+//   4. MiniMax-M3     — cline -p -P minimax         -m MiniMax-M3 --thinking high
+//   5. Kimi           — cline -p -P moonshot        -m kimi-k2.7-code  (LAST)
 // cline `-p` is PLAN MODE: it investigates but cannot edit (our read-only enforcement). claude `-p` is
 // print mode; its read-only comes from --allowedTools. Absolute paths: the review shell doesn't source
 // ~/.zshrc. No --json (it re-emits every event — token bloat); redirect to a temp file and tail it.
 const CLINE = '/opt/homebrew/bin/cline'
 const CLAUDE = '$HOME/.local/bin/claude'
 
-// Impl/fix DELEGATION ladder — the orchestrator rates each item's difficulty 1-5 and the matching
-// tier's coding agent does the work AND the git commit, instead of the workflow re-spawning its own
-// model on everything. The matched tier is the PRIMARY; if it is unavailable (quota/auth) the delegate
-// falls through to the next ladder model in the SAME stage (see candidatesFor / delegate below). cline runs in ACT mode (no -p) where
-// --auto-approve defaults true, so it edits files and runs git autonomously; claude runs write-capable
-// via --permission-mode bypassPermissions. Same no-`--json`, redirect-and-tail discipline as the review
-// chain. Ascending difficulty = ascending intelligence score (thinking=high; tiers 2 + 5 are Claude →
-// spend main Claude credits; 1/3/4 use cline provider plans):
+// Impl/fix DELEGATION ladder — tiers ordered by ASCENDING INTELLIGENCE SCORE. The orchestrator rates
+// each item's difficulty 1-5 and the matching tier's coding agent does the work AND the git commit,
+// instead of the workflow re-spawning its own model on everything. The matched tier is the PRIMARY; if
+// it is unavailable (quota/auth) the delegate falls through to the next ladder model in the SAME stage
+// (see candidatesFor / delegate below). cline runs in ACT mode (no -p) where --auto-approve defaults
+// true, so it edits files and runs git autonomously; claude runs write-capable via
+// --permission-mode bypassPermissions. Same no-`--json`, redirect-and-tail discipline as the review
+// chain. thinking=high throughout; tiers 3 + 6 are Claude → spend main Claude credits; 1/2/4/5 use cline
+// provider plans (each with an EXPLICIT -P provider — never the bare default `cline` provider):
 const LADDER = [
   { tier: 1, name: 'kimi-k2.7', score: 42, kind: 'cline', base: `${CLINE} -P moonshot -m kimi-k2.7-code` },
-  { tier: 2, name: 'claude-sonnet-4-6', score: 47, kind: 'claude', model: 'claude-sonnet-4-6' },
-  { tier: 3, name: 'glm-5.2', score: 51, kind: 'cline', base: `${CLINE} -P zai-coding-plan -m glm-5.2 --thinking high` },
-  { tier: 4, name: 'gpt-5.5', score: 54, kind: 'cline', base: `${CLINE} -P openai-codex -m gpt-5.5 --thinking high` },
-  { tier: 5, name: 'claude-opus-4-8', score: 56, kind: 'claude', model: 'claude-opus-4-8' },
+  { tier: 2, name: 'minimax-m3', score: 44, kind: 'cline', base: `${CLINE} -P minimax -m MiniMax-M3 --thinking high` },
+  { tier: 3, name: 'claude-sonnet-4-6', score: 47, kind: 'claude', model: 'claude-sonnet-4-6' },
+  { tier: 4, name: 'glm-5.2', score: 51, kind: 'cline', base: `${CLINE} -P zai-coding-plan -m glm-5.2 --thinking high` },
+  { tier: 5, name: 'gpt-5.5', score: 54, kind: 'cline', base: `${CLINE} -P openai-codex -m gpt-5.5 --thinking high` },
+  { tier: 6, name: 'claude-opus-4-8', score: 56, kind: 'claude', model: 'claude-opus-4-8' },
 ]
-const clampTier = (t) => Math.max(1, Math.min(5, Math.round(t) || 3))
+const clampTier = (t) => Math.max(1, Math.min(LADDER.length, Math.round(t) || 1))
+// Difficulty 1-5 → starting tier on the score ladder. minimax (tier 2, intelligence score 44) sits
+// between kimi and sonnet and is reached via fallback/escalation; difficulty maps to the original five
+// primaries so existing ratings behave unchanged. Default difficulty 3 → tier 4 (glm).
+const DIFF_TIER = { 1: 1, 2: 3, 3: 4, 4: 5, 5: 6 }
+const tierFor = (difficulty) => DIFF_TIER[Math.max(1, Math.min(5, Math.round(difficulty) || 3))]
 // Difficulty picks the PRIMARY model; the rest of the ladder are fallbacks tried (in the same stage)
 // ONLY when the current model is unavailable (out of quota/auth) — never to "second-guess" a model that
 // actually ran. Order: chosen tier first, then higher tiers (more capable) ascending, then lower tiers
@@ -101,7 +109,7 @@ const clampTier = (t) => Math.max(1, Math.min(5, Math.round(t) || 3))
 const candidatesFor = (tier) => {
   const t = clampTier(tier)
   const up = []
-  for (let i = t + 1; i <= 5; i++) up.push(LADDER[i - 1])
+  for (let i = t + 1; i <= LADDER.length; i++) up.push(LADDER[i - 1])
   const down = []
   for (let i = t - 1; i >= 1; i--) down.push(LADDER[i - 1])
   return [LADDER[t - 1], ...up, ...down]
@@ -190,7 +198,7 @@ const reviewAgent = (target, label) => {
   return agent(
     `On branch \`${branch}\`, review ${scopeMd}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
       `Run exactly ONE reviewer command per Bash call (Bash timeout 600000 ms), WAIT for it to finish, then ` +
-      `decide. NEVER run two reviewers in parallel — no parallel Bash calls. Each CLINE command (1, 2, 4) ` +
+      `decide. NEVER run two reviewers in parallel — no parallel Bash calls. Each CLINE command (1, 2, 4, 5) ` +
       `redirects to its own temp file and tails it: read ONLY that tail (the final findings) — do NOT use ` +
       `--json (it dumps the whole event stream); claude (3) prints its final answer directly, no redirect. ` +
       `Classify the output of the FIRST that produces a review and STOP (do not run the others). ` +
@@ -204,7 +212,8 @@ const reviewAgent = (target, label) => {
       `  1. gpt-5.5:  ${CLINE} -p -P openai-codex -m gpt-5.5 "${p}" > ${tmp(1)} 2>&1; tail -n 120 ${tmp(1)}\n` +
       `  2. GLM-5.2:  ${CLINE} -p -P zai-coding-plan -m glm-5.2 "${p}" > ${tmp(2)} 2>&1; tail -n 120 ${tmp(2)}\n` +
       `  3. Claude Sonnet (spends main Claude credits): ${CLAUDE} -p "${p}" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"\n` +
-      `  4. Kimi (LAST): ${CLINE} -p -P moonshot -m kimi-k2.7-code "${p}" > ${tmp(4)} 2>&1; tail -n 120 ${tmp(4)}\n\n` +
+      `  4. MiniMax-M3: ${CLINE} -p -P minimax -m MiniMax-M3 --thinking high "${p}" > ${tmp(4)} 2>&1; tail -n 120 ${tmp(4)}\n` +
+      `  5. Kimi (LAST): ${CLINE} -p -P moonshot -m kimi-k2.7-code "${p}" > ${tmp(5)} 2>&1; tail -n 120 ${tmp(5)}\n\n` +
       `Assume all are configured and logged in — do NOT configure keys/models. Whichever runs prints ` +
       `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
       `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Edit nothing. If EVERY reviewer ` +
@@ -226,8 +235,8 @@ await agent(
 const unresolved = []
 
 for (const item of items) {
-  const baseTier = clampTier(item.difficulty)
-  let escalations = 0 // each failed round bumps the fix one tier up the ladder (capped at 5)
+  const baseTier = tierFor(item.difficulty)
+  let escalations = 0 // each failed round bumps the fix one tier up the ladder (capped at the top tier)
   const fixTier = () => clampTier(baseTier + escalations)
 
   const impl = await delegate(implTask(item), baseTier, `impl:${item.label}`)
@@ -286,9 +295,9 @@ for (const item of items) {
 // per-commit gates can't see. Loop-fix like the per-commit gate, then hand back for the merge decision.
 let branchBlockers = []
 {
-  // Cross-commit fixes are subtle — start near the top of the ladder (max item difficulty, min 4) and
-  // escalate to 5 across the ≤3 rounds.
-  const branchBase = clampTier(Math.max(4, ...items.map((it) => clampTier(it.difficulty))))
+  // Cross-commit fixes are subtle — start near the top of the ladder (max item tier, min gpt) and
+  // escalate to the top tier across the ≤3 rounds.
+  const branchBase = clampTier(Math.max(tierFor(4), ...items.map((it) => tierFor(it.difficulty))))
   let round = 0
   while (round < BRANCH_MAX) {
     round++

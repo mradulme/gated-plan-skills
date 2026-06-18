@@ -1,6 +1,6 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI; on a quota/auth miss it falls through to the next ladder model in the same stage) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the difficulty-matched coding agent (intelligence ladder kimi → minimax → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI; on a quota/auth miss it falls through to the next ladder model in the same stage) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → MiniMax-M3 → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
@@ -9,10 +9,10 @@ Drive a commit-level plan YAML to done: per phase, branch from a base, do each i
 (one commit each), gate every commit on a review loop until no P1/P2, then gate the **whole branch
 against `main`** before merge. Each item's implementation/fix is **delegated to the single coding-agent CLI
 matched to the item's difficulty** (the orchestrator rates 1–5 → an intelligence-score ladder
-**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI; the
+**kimi → minimax → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI; the
 matched tier is primary and an unavailable model falls through to the next ladder model in the same
 stage) — the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
-**gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi** (all via [cline](https://docs.cline.bot/usage/cli-overview)
+**gpt-5.5 → GLM-5.2 → Claude Sonnet → MiniMax-M3 → Kimi** (all via [cline](https://docs.cline.bot/usage/cli-overview)
 except Claude, which uses the [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)) — the
 first with quota; the next is tried only if that one can't review (never two at once). The
 deterministic loop lives in the bundled workflow `phase-review-loop.js` (next to this file); this
@@ -90,7 +90,8 @@ skill parses the YAML and drives it phase-by-phase.
    3. **Claude Sonnet** (spends main-loop Claude credits) — `claude -p "<review prompt>"
       --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"` (read-only whitelist
       so it can't edit).
-   4. **Kimi** (last) — `cline -p -P moonshot -m kimi-k2.7-code "<review prompt>"`.
+   4. **MiniMax-M3** — `cline -p -P minimax -m MiniMax-M3 --thinking high "<review prompt>"`.
+   5. **Kimi** (last) — `cline -p -P moonshot -m kimi-k2.7-code "<review prompt>"`.
 
    `cline -p` is **plan mode** — it investigates (git, file reads) but structurally cannot edit, the
    cline equivalent of Claude's read-only `--allowedTools`. **No `--json`** (it re-emits every event —
@@ -102,34 +103,39 @@ skill parses the YAML and drives it phase-by-phase.
    pre-dump a diff into the prompt (that's the point of the chain — a real review, not a skim). All
    print text findings, so one classifier handles all. Binaries are invoked by **absolute path** (the
    review shell doesn't source `~/.zshrc`). **Assume cline (providers `openai-codex`, `zai-coding-plan`,
-   `moonshot`) and claude are configured and logged in** — never prompt for or set keys/models during
-   execution; the workflow only invokes the CLIs. Setup is in the README.
+   `minimax`, `moonshot`) and claude are configured and logged in** — never prompt for or set keys/models
+   during execution; the workflow only invokes the CLIs. Every cline call names an **explicit `-P`
+   provider** — the bare default `cline` provider is never used. Setup is in the README.
 
    **Implementation & fix delegation.** The workflow does NOT implement items itself — each impl/fix is
    handed to a coding-agent CLI sized to the item's `difficulty`, via the same `cline`/`claude` binaries
    the review chain uses, but in **write mode** (cline ACT mode — no `-p`, `--auto-approve` defaults
    true; claude `-p … --permission-mode bypassPermissions`). The agent edits files and makes the commit
-   itself. The intelligence-score ladder (ascending difficulty):
+   itself. The intelligence-score ladder (tiers ascending by score; thinking=high throughout):
 
-   | difficulty | model | invocation |
-   |---|---|---|
-   | 1 | kimi-k2.7 | `cline -P moonshot -m kimi-k2.7-code` |
-   | 2 | claude-sonnet-4-6 | `claude --model claude-sonnet-4-6 -p … --permission-mode bypassPermissions` |
-   | 3 | glm-5.2 | `cline -P zai-coding-plan -m glm-5.2 --thinking high` |
-   | 4 | gpt-5.5 | `cline -P openai-codex -m gpt-5.5 --thinking high` |
-   | 5 | claude-opus-4-8 | `claude --model claude-opus-4-8 -p … --permission-mode bypassPermissions` |
+   | tier | model | score | invocation |
+   |---|---|---|---|
+   | 1 | kimi-k2.7 | 42 | `cline -P moonshot -m kimi-k2.7-code` |
+   | 2 | minimax-m3 | 44 | `cline -P minimax -m MiniMax-M3 --thinking high` |
+   | 3 | claude-sonnet-4-6 | 47 | `claude --model claude-sonnet-4-6 -p … --permission-mode bypassPermissions` |
+   | 4 | glm-5.2 | 51 | `cline -P zai-coding-plan -m glm-5.2 --thinking high` |
+   | 5 | gpt-5.5 | 54 | `cline -P openai-codex -m gpt-5.5 --thinking high` |
+   | 6 | claude-opus-4-8 | 56 | `claude --model claude-opus-4-8 -p … --permission-mode bypassPermissions` |
 
-   Tiers **2 and 5 are Claude → spend main-loop Claude credits**; tiers 1/3/4 use the cline provider
-   plans. Difficulty selects the **primary** model; the rest of the ladder are **quota/auth fallbacks**
-   tried in the **same stage**, one at a time, advancing to the next **only when the current model is
-   unavailable** (out of quota/auth/usage-limit) — order is chosen tier, then higher tiers ascending,
-   then lower descending, so it degrades to the nearest equal-or-stronger model first. A model that
-   actually **ran but left no commit** ends the chain (a real attempt the gate/fix loop handles, not a
-   fallback trigger); only if **every** candidate is unavailable is the item left for retry (gate goes
-   red). The task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix
-   escalation:** a fix first uses the item's impl tier, then bumps **one tier up the ladder per failed
-   round** (capped at tier 5) — still one model per round, just a higher one; the final branch-fix starts
-   at the phase's max item difficulty (min tier 4) and escalates to 5 across its ≤3 rounds.
+   Tiers **3 and 6 are Claude → spend main-loop Claude credits**; tiers 1/2/4/5 use the cline provider
+   plans. **Difficulty 1–5 maps to a starting tier** — `1→1, 2→3, 3→4, 4→5, 5→6` — so the five difficulty
+   levels pick the original five primaries (kimi, sonnet, glm, gpt, opus) unchanged; **minimax (tier 2,
+   score 44)** sits between kimi and sonnet and is reached via fallback/escalation. Difficulty selects the
+   **primary** model; the rest of the ladder are **quota/auth fallbacks** tried in the **same stage**, one
+   at a time, advancing to the next **only when the current model is unavailable** (out of
+   quota/auth/usage-limit) — order is chosen tier, then higher tiers ascending, then lower descending, so
+   it degrades to the nearest equal-or-stronger model first. A model that actually **ran but left no
+   commit** ends the chain (a real attempt the gate/fix loop handles, not a fallback trigger); only if
+   **every** candidate is unavailable is the item left for retry (gate goes red). The task text is passed
+   via a temp file so backticks/`$`/quotes survive intact. **Fix escalation:** a fix first uses the item's
+   impl tier, then bumps **one tier up the ladder per failed round** (capped at the top tier) — still one
+   model per round, just a higher one; the final branch-fix starts at the phase's max item tier (min tier
+   5, gpt) and escalates to tier 6 (opus) across its ≤3 rounds.
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
