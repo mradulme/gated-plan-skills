@@ -1,6 +1,6 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the one difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI; no fallback) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI; on a quota/auth miss it falls through to the next ladder model in the same stage) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
@@ -9,8 +9,9 @@ Drive a commit-level plan YAML to done: per phase, branch from a base, do each i
 (one commit each), gate every commit on a review loop until no P1/P2, then gate the **whole branch
 against `main`** before merge. Each item's implementation/fix is **delegated to the single coding-agent CLI
 matched to the item's difficulty** (the orchestrator rates 1–5 → an intelligence-score ladder
-**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI; exactly
-one model per task, no fallback) — the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
+**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI; the
+matched tier is primary and an unavailable model falls through to the next ladder model in the same
+stage) — the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
 **gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi** (all via [cline](https://docs.cline.bot/usage/cli-overview)
 except Claude, which uses the [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)) — the
 first with quota; the next is tried only if that one can't review (never two at once). The
@@ -119,10 +120,13 @@ skill parses the YAML and drives it phase-by-phase.
    | 5 | claude-opus-4-8 | `claude --model claude-opus-4-8 -p … --permission-mode bypassPermissions` |
 
    Tiers **2 and 5 are Claude → spend main-loop Claude credits**; tiers 1/3/4 use the cline provider
-   plans. Difficulty selects **exactly one** model — there is **no fallback candidate list**: the
-   delegated subagent runs only that model, and if it can't run (out of quota/auth/usage-limit) the item
-   is left for retry and surfaces as unavailable (the gate goes red), never silently run on a different
-   model. The task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix
+   plans. Difficulty selects the **primary** model; the rest of the ladder are **quota/auth fallbacks**
+   tried in the **same stage**, one at a time, advancing to the next **only when the current model is
+   unavailable** (out of quota/auth/usage-limit) — order is chosen tier, then higher tiers ascending,
+   then lower descending, so it degrades to the nearest equal-or-stronger model first. A model that
+   actually **ran but left no commit** ends the chain (a real attempt the gate/fix loop handles, not a
+   fallback trigger); only if **every** candidate is unavailable is the item left for retry (gate goes
+   red). The task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix
    escalation:** a fix first uses the item's impl tier, then bumps **one tier up the ladder per failed
    round** (capped at tier 5) — still one model per round, just a higher one; the final branch-fix starts
    at the phase's max item difficulty (min tier 4) and escalates to 5 across its ≤3 rounds.
