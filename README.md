@@ -10,7 +10,7 @@ with quota), looping until there are no P1/P2 findings. All but Claude run throu
 | Skill | Invoke | Does |
 |---|---|---|
 | `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. |
-| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** via a subagent (one commit each), reviews via one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
+| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a difficulty-sized coding agent** (ladder kimi → sonnet → glm → gpt → opus) — reviews via one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
 
 The two compose: **create → execute**. The only coupling is the YAML schema — `create` emits exactly
 what `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do` scope, a `gate`, and
@@ -18,18 +18,23 @@ a `done` flag).
 
 ## Requirements
 
-- [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) (`claude`) — logged in. Used both
-  to run the skills and as the Claude Sonnet reviewer.
+- [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) (`claude`) — logged in. Used to run
+  the skills, as the Claude Sonnet reviewer, and (write-capable, via `--permission-mode
+  bypassPermissions`) as the `claude-sonnet-4-6` / `claude-opus-4-8` impl-and-fix tiers.
 - [cline CLI](https://docs.cline.bot/usage/cli-overview) — **installed with these providers
-  configured** (`cline auth`), not needed for `gated-plan-create`. The reviewers for
-  `gated-plan-execute` use exactly one of these per review, picked by fallback order (first with quota):
+  configured** (`cline auth`), not needed for `gated-plan-create`. `gated-plan-execute` uses these
+  for both **review** (plan mode, `-p`) and **implementation/fixes** (act mode — no `-p`,
+  `--auto-approve` defaults true — so the agent edits files and commits). The reviewers use exactly one
+  per review, picked by fallback order (first with quota):
   1. `cline -p -P openai-codex -m gpt-5.5`
   2. `cline -p -P zai-coding-plan -m glm-5.2`
   3. `claude -p --model claude-sonnet-4-6` (Claude Code CLI; spends your main Claude credits)
   4. `cline -p -P moonshot -m kimi-k2.7-code` (last)
 
-  The skill never sets keys/models; it assumes cline's providers and `claude` are preconfigured, and
-  invokes each by absolute path (the review shell doesn't source `~/.zshrc`).
+  Implementation/fixes pick a model by the item's difficulty (1–5): `kimi-k2.7` · `claude-sonnet-4-6` ·
+  `glm-5.2` · `gpt-5.5` · `claude-opus-4-8` (the two Claude tiers spend your main Claude credits). The
+  skill never sets keys/models; it assumes cline's providers and `claude` are preconfigured, and
+  invokes each by absolute path (the shell doesn't source `~/.zshrc`).
 - `git` (work happens on real branches/commits).
 
 ## Install
@@ -65,9 +70,12 @@ Skills load at session start — start a fresh Claude Code session after install
 
 ## How the review gate works
 
-For each item: an impl subagent commits the work. Then, **before** any review, a read-only
-subagent re-runs the item's own `gate` (its `npm run lint` / `typecheck` / `test` command) on the
-committed HEAD — a hard precondition. A red gate is fixed and re-verified first, so the reviewer never
+For each item: a **delegated coding agent** — picked from the difficulty ladder (`kimi-k2.7` →
+`claude-sonnet-4-6` → `glm-5.2` → `gpt-5.5` → `claude-opus-4-8`), run write-capable via cline act mode
+or `claude --permission-mode bypassPermissions` — implements the item and commits. The workflow never
+writes the code itself; it only rates difficulty and drives the loop. Then, **before** any review, a
+read-only subagent re-runs the item's own `gate` (its `npm run lint` / `typecheck` / `test` command) on
+the committed HEAD — a hard precondition. A red gate is fixed and re-verified first, so the reviewer never
 sees a build that doesn't lint/typecheck/test green. Once the gate is green, a review subagent runs
 **one reviewer** over the new commit — tried in fallback order, one at a time, using the first with
 quota (never two at once). All are **agentic** — they run git and read the code themselves (not a diff
@@ -85,8 +93,9 @@ Claude's `--allowedTools`). cline output is redirected to a temp file and the ta
 `--json` — it would dump the whole event stream).
 
 It reads the findings and returns them classified as **P1** (must-fix: bug, regression, security,
-data loss, broken gate) / **P2** (should-fix) / ignore (nits, style). Any P1/P2 → a fix subagent
-addresses them and recommits → re-review. Capped at `maxRounds` (default 7).
+data loss, broken gate) / **P2** (should-fix) / ignore (nits, style). Any P1/P2 → a delegated fix agent
+addresses them and recommits → re-review. Fixes start at the item's impl tier and **escalate one tier
+up the ladder per failed round** (capped at `claude-opus-4-8`). Capped at `maxRounds` (default 7).
 
 After every item in the phase is clean, one **final review of the whole branch against `reviewBase`**
 (same fallback order, against `git diff main...HEAD`) runs to catch cross-commit interactions the

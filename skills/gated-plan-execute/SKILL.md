@@ -1,13 +1,16 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, with each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by a difficulty-sized coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
 
 Drive a commit-level plan YAML to done: per phase, branch from a base, do each item **sequentially**
-via a subagent (one commit each), gate every commit on a review loop until no P1/P2, then gate the
-**whole branch against `main`** before merge. Review uses **one reviewer**, picked by fallback order —
+(one commit each), gate every commit on a review loop until no P1/P2, then gate the **whole branch
+against `main`** before merge. Each item's implementation/fix is **delegated to a coding-agent CLI
+sized to the item's difficulty** (the orchestrator rates 1–5 → an intelligence-score ladder
+**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI) —
+the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
 **gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi** (all via [cline](https://docs.cline.bot/usage/cli-overview)
 except Claude, which uses the [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)) — the
 first with quota; the next is tried only if that one can't review (never two at once). The
@@ -32,9 +35,15 @@ skill parses the YAML and drives it phase-by-phase.
    order, pausing for the merge decision (step 5) between each.
 
 3. **Build the items list** for that phase — one entry per item where `done` is not `true`:
-   `{ label: item.id, prompt: item.do + "\n\nGate: " + item.gate, gate: item.gate }`.
+   `{ label: item.id, prompt: item.do + "\n\nGate: " + item.gate, gate: item.gate, difficulty: <1-5> }`.
    Pass `gate` as its own field too — the workflow re-runs it on HEAD as a **hard precondition**
    each round and only spawns the reviewer once it's green (see below). Skip items already `done: true`.
+
+   **Rate each item's `difficulty` 1–5** by reading its `do` + `gate` — this picks which coding agent
+   implements/fixes it (ladder below). Rubric: `1` trivial/mechanical (rename, config bump, one-liner) ·
+   `2` simple localized change · `3` moderate, multi-file, standard feature · `4` hard/tricky logic
+   (concurrency, cross-cutting, careful edge cases) · `5` very hard — architecture, high blast radius,
+   subtle correctness/security. When unsure, default `3`.
 
 4. **Run the phase** via the bundled workflow (this is the explicit opt-in to call `Workflow`).
    Pass `args` as an actual JSON object, not a string:
@@ -95,6 +104,28 @@ skill parses the YAML and drives it phase-by-phase.
    `moonshot`) and claude are configured and logged in** — never prompt for or set keys/models during
    execution; the workflow only invokes the CLIs. Setup is in the README.
 
+   **Implementation & fix delegation.** The workflow does NOT implement items itself — each impl/fix is
+   handed to a coding-agent CLI sized to the item's `difficulty`, via the same `cline`/`claude` binaries
+   the review chain uses, but in **write mode** (cline ACT mode — no `-p`, `--auto-approve` defaults
+   true; claude `-p … --permission-mode bypassPermissions`). The agent edits files and makes the commit
+   itself. The intelligence-score ladder (ascending difficulty):
+
+   | difficulty | model | invocation |
+   |---|---|---|
+   | 1 | kimi-k2.7 | `cline -P moonshot -m kimi-k2.7-code` |
+   | 2 | claude-sonnet-4-6 | `claude --model claude-sonnet-4-6 -p … --permission-mode bypassPermissions` |
+   | 3 | glm-5.2 | `cline -P zai-coding-plan -m glm-5.2 --thinking high` |
+   | 4 | gpt-5.5 | `cline -P openai-codex -m gpt-5.5 --thinking high` |
+   | 5 | claude-opus-4-8 | `claude --model claude-opus-4-8 -p … --permission-mode bypassPermissions` |
+
+   Tiers **2 and 5 are Claude → spend main-loop Claude credits**; tiers 1/3/4 use the cline provider
+   plans. Like reviews, delegation falls through to the next candidate (chosen tier, then the rest by
+   descending score) **only** on quota/auth/usage-limit failure — never because the task was hard; the
+   task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix escalation:** a fix
+   first uses the item's impl tier, then bumps **one tier up the ladder per failed round** (capped at
+   tier 5); the final branch-fix starts at the phase's max item difficulty (min tier 4) and escalates to
+   5 across its ≤3 rounds.
+
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
    - Report `unresolved` (items still carrying P1/P2 after `maxRounds`) and `branchUnresolved`
@@ -109,7 +140,9 @@ skill parses the YAML and drives it phase-by-phase.
 
 ## Guardrails
 - One item = one commit = one review gate; the branch then gets one final review vs `reviewBase`.
-  Keep impl subagents scoped to a single item.
+  Keep each delegated impl/fix scoped to a single item.
+- Impl/fix are **delegated CLI coding agents** (difficulty-sized, write mode), not the orchestrator
+  itself; the orchestrator only rates difficulty, classifies reviews, and drives the loop.
 - Sequential only (no parallel item agents) — they share the working tree.
 - The review subagent **runs ONE reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi)
   and classifies**; it never edits. Fixes are a separate subagent.
