@@ -22,7 +22,9 @@ a `done` flag).
   the skills, as the Claude Sonnet reviewer, and (write-capable, via `--permission-mode
   bypassPermissions`) as the `claude-sonnet-4-6` / `claude-opus-4-8` impl-and-fix tiers.
 - [cline CLI](https://docs.cline.bot/usage/cli-overview) — **installed with these providers
-  configured** (`cline auth`), not needed for `gated-plan-create`. `gated-plan-execute` uses these
+  configured** (`cline auth`). Optional for `gated-plan-create` (an advisory plan-mode sounding board —
+  gpt-5.5 / GLM-5.2 — it may consult on hard splitting calls; skipped if unconfigured).
+  `gated-plan-execute` uses these
   for both **review** (plan mode, `-p`) and **implementation/fixes** (act mode — no `-p`,
   `--auto-approve` defaults true — so the agent edits files and commits). The reviewers use exactly one
   per review, picked by fallback order (first with quota):
