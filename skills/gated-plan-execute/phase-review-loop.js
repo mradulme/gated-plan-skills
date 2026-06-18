@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to a difficulty-sized coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode), gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, then Kimi (cline for all but Claude), using the first with quota',
+  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the ONE difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode; no fallback — a quota miss surfaces the item), gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, then Kimi (cline for all but Claude), using the first with quota',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -78,11 +78,12 @@ const CLINE = '/opt/homebrew/bin/cline'
 const CLAUDE = '$HOME/.local/bin/claude'
 
 // Impl/fix DELEGATION ladder — the orchestrator rates each item's difficulty 1-5 and the matching
-// tier's coding agent does the work AND the git commit, instead of the workflow re-spawning its own
-// model on everything. cline runs in ACT mode (no -p) where --auto-approve defaults true, so it edits
-// files and runs git autonomously; claude runs write-capable via --permission-mode bypassPermissions.
-// Same no-`--json`, redirect-and-tail discipline as the review chain. Ascending difficulty = ascending
-// intelligence score (tiers 2 + 5 are Claude → spend main Claude credits; 1/3/4 use cline provider plans):
+// tier's coding agent (EXACTLY ONE model, no fallback) does the work AND the git commit, instead of
+// the workflow re-spawning its own model on everything. cline runs in ACT mode (no -p) where
+// --auto-approve defaults true, so it edits files and runs git autonomously; claude runs write-capable
+// via --permission-mode bypassPermissions. Same no-`--json`, redirect-and-tail discipline as the review
+// chain. Ascending difficulty = ascending intelligence score (thinking=high; tiers 2 + 5 are Claude →
+// spend main Claude credits; 1/3/4 use cline provider plans):
 const LADDER = [
   { tier: 1, name: 'kimi-k2.7', score: 42, kind: 'cline', base: `${CLINE} -P moonshot -m kimi-k2.7-code` },
   { tier: 2, name: 'claude-sonnet-4-6', score: 47, kind: 'claude', model: 'claude-sonnet-4-6' },
@@ -91,12 +92,10 @@ const LADDER = [
   { tier: 5, name: 'claude-opus-4-8', score: 56, kind: 'claude', model: 'claude-opus-4-8' },
 ]
 const clampTier = (t) => Math.max(1, Math.min(5, Math.round(t) || 3))
-// Candidates for a chosen tier: chosen model first, then the rest by DESCENDING score — a quota/auth
-// fall-through still lands on the most capable remaining agent.
-const candidates = (tier) => {
-  const chosen = LADDER[clampTier(tier) - 1]
-  return [chosen, ...LADDER.filter((m) => m !== chosen).sort((a, b) => b.score - a.score)]
-}
+// Difficulty selects EXACTLY ONE model — no candidate list, no fall-through. A quota/auth miss on the
+// chosen model surfaces the item as unavailable (the gate goes red and a later, escalated round picks
+// a different single model); it never silently runs another model in the same call.
+const modelFor = (tier) => LADDER[clampTier(tier) - 1]
 // The shell line that feeds <taskfile> to a candidate as its prompt in write/act mode, redirecting to
 // <out> and tailing it. "$(cat ...)" passes arbitrary task text (backticks/$/quotes/newlines) as one
 // arg the shell does not re-interpret.
@@ -116,34 +115,32 @@ const DELEGATE = {
   },
 }
 
-// Delegate ONE implementation/fix task to the difficulty-sized coding agent. It writes the task to a
-// temp file (safe quoting), runs candidates ONE AT A TIME, stops at the first that makes a commit, and
-// falls through to the next ONLY on quota/auth/usage-limit failure (never because the task was hard).
+// Delegate ONE implementation/fix task to the SINGLE difficulty-matched coding agent. It writes the
+// task to a temp file (safe quoting), runs that ONE model, and reports whether it committed. There is
+// NO candidate list and NO fall-through: if the chosen model can't run (quota/auth), the item is left
+// for retry — never silently run a different model.
 const delegate = (task, tier, label) => {
   const slug = label.replace(/[^a-z0-9]+/gi, '-')
   const taskfile = `/tmp/gpe-task-${slug}.txt`
-  const list = candidates(tier)
-    .map((m, i) => `  ${i + 1}. ${m.name} (tier ${m.tier}): ${candidateCmd(m, taskfile, `/tmp/gpe-out-${slug}-${m.tier}.txt`)}`)
-    .join('\n')
+  const m = modelFor(tier)
+  const cmd = candidateCmd(m, taskfile, `/tmp/gpe-out-${slug}-${m.tier}.txt`)
   return agent(
     `You are delegating ONE implementation/fix task on git branch \`${branch}\` to a coding-agent CLI — ` +
-      `do NOT do the coding yourself. First write the task (given at the END of this message) VERBATIM to ` +
-      `${taskfile} using the Write tool, so backticks/$/quotes/newlines are preserved exactly. Then run the ` +
-      `candidate CLIs STRICTLY ONE AT A TIME, IN ORDER, exactly as written (absolute paths — the shell does ` +
-      `not source ~/.zshrc), each with Bash timeout 600000 ms. WAIT for each to finish before deciding. NEVER ` +
-      `run two in parallel. Each is agentic and WRITE-CAPABLE (cline in ACT mode auto-approves its tools; ` +
-      `claude runs with bypassPermissions) — it edits files and makes the git commit itself. Do NOT pass ` +
-      `--json. Read ONLY the tail.\n\n${list}\n\n` +
-      `STOP at the FIRST candidate that completes the task AND leaves a NEW commit at HEAD (verify with ` +
-      `git log --oneline -1 / that HEAD advanced) — return its result, do not run the rest. Move to the next ` +
-      `candidate ONLY if the current one cannot run because it is out of credits/quota/rate-limit, OR (for ` +
-      `cline) an auth / unauthenticated / not-logged-in / expired-or-invalid-token error (e.g. a single line ` +
-      `"error: The usage limit has been reached" or "error: Invalid Authentication", exit 1). Do NOT fall ` +
-      `through for any other error. If a candidate ran but left NO new commit and it was NOT a quota/auth ` +
-      `failure, return committed:false with the tail as detail — do NOT silently try the others. If EVERY ` +
-      `candidate is out of quota/auth, return { committed:false, model:"none", detail:"NO CODING AGENT ` +
-      `AVAILABLE: all out of quota/auth" }. Otherwise return { committed:true, model:<name that ran>, ` +
-      `detail:<short summary + commit subject> }.\n\n--- TASK (write this verbatim to ${taskfile}) ---\n${task}`,
+      `do NOT do the coding yourself, and do NOT substitute any other model. Difficulty already selected ` +
+      `EXACTLY ONE model for this task: ${m.name} (tier ${m.tier}). First write the task (given at the END ` +
+      `of this message) VERBATIM to ${taskfile} using the Write tool, so backticks/$/quotes/newlines are ` +
+      `preserved exactly. Then run this ONE command exactly as written (absolute paths — the shell does not ` +
+      `source ~/.zshrc), with Bash timeout 600000 ms. It is agentic and WRITE-CAPABLE (cline in ACT mode ` +
+      `auto-approves its tools; claude runs with bypassPermissions) — it edits files and makes the git ` +
+      `commit itself. Do NOT pass --json. Read ONLY the tail.\n\n  ${cmd}\n\n` +
+      `If it completes the task AND leaves a NEW commit at HEAD (verify with git log --oneline -1 / that ` +
+      `HEAD advanced), return { committed:true, model:"${m.name}", detail:<short summary + commit subject> }. ` +
+      `If it ran but left NO new commit, return { committed:false, model:"${m.name}", detail:<tail> }. If it ` +
+      `cannot run because it is out of credits/quota/rate-limit, OR (for cline) an auth / unauthenticated / ` +
+      `not-logged-in / expired-or-invalid-token error (e.g. a single line "error: The usage limit has been ` +
+      `reached" or "error: Invalid Authentication", exit 1), return { committed:false, model:"none", ` +
+      `detail:"${m.name} UNAVAILABLE: out of quota/auth — item left for retry" }. NEVER try another model.` +
+      `\n\n--- TASK (write this verbatim to ${taskfile}) ---\n${task}`,
     { label, phase: phaseTitle, schema: DELEGATE }
   )
 }

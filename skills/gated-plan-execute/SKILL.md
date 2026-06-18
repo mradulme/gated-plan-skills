@@ -1,16 +1,16 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by a difficulty-sized coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the one difficulty-matched coding agent (intelligence ladder kimi → sonnet → glm → gpt → opus, via cline act-mode or the claude CLI; no fallback) and each commit reviewed by one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, via cline except Claude, using the first with quota) and looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
 
 Drive a commit-level plan YAML to done: per phase, branch from a base, do each item **sequentially**
 (one commit each), gate every commit on a review loop until no P1/P2, then gate the **whole branch
-against `main`** before merge. Each item's implementation/fix is **delegated to a coding-agent CLI
-sized to the item's difficulty** (the orchestrator rates 1–5 → an intelligence-score ladder
-**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI) —
-the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
+against `main`** before merge. Each item's implementation/fix is **delegated to the single coding-agent CLI
+matched to the item's difficulty** (the orchestrator rates 1–5 → an intelligence-score ladder
+**kimi → sonnet → glm → gpt → opus**, run write-capable via `cline` act mode or the `claude` CLI; exactly
+one model per task, no fallback) — the workflow never re-spawns itself to write code. Review uses **one reviewer**, picked by fallback order —
 **gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi** (all via [cline](https://docs.cline.bot/usage/cli-overview)
 except Claude, which uses the [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)) — the
 first with quota; the next is tried only if that one can't review (never two at once). The
@@ -119,12 +119,13 @@ skill parses the YAML and drives it phase-by-phase.
    | 5 | claude-opus-4-8 | `claude --model claude-opus-4-8 -p … --permission-mode bypassPermissions` |
 
    Tiers **2 and 5 are Claude → spend main-loop Claude credits**; tiers 1/3/4 use the cline provider
-   plans. Like reviews, delegation falls through to the next candidate (chosen tier, then the rest by
-   descending score) **only** on quota/auth/usage-limit failure — never because the task was hard; the
-   task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix escalation:** a fix
-   first uses the item's impl tier, then bumps **one tier up the ladder per failed round** (capped at
-   tier 5); the final branch-fix starts at the phase's max item difficulty (min tier 4) and escalates to
-   5 across its ≤3 rounds.
+   plans. Difficulty selects **exactly one** model — there is **no fallback candidate list**: the
+   delegated subagent runs only that model, and if it can't run (out of quota/auth/usage-limit) the item
+   is left for retry and surfaces as unavailable (the gate goes red), never silently run on a different
+   model. The task text is passed via a temp file so backticks/`$`/quotes survive intact. **Fix
+   escalation:** a fix first uses the item's impl tier, then bumps **one tier up the ladder per failed
+   round** (capped at tier 5) — still one model per round, just a higher one; the final branch-fix starts
+   at the phase's max item difficulty (min tier 4) and escalates to 5 across its ≤3 rounds.
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
