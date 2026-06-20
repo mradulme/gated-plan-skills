@@ -1,20 +1,23 @@
 # gated-plan-skills
 
-Two paired [Claude Code](https://claude.com/claude-code) skills for shipping work as a series of
-small, independently-verifiable commits — each one **gated by an AI code-review loop**. One reviewer
-runs per review, picked by fallback order (gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi, using the first
-with quota), looping until there are no P1/P2 findings. All but Claude run through the
+Three composing [Claude Code](https://claude.com/claude-code) skills for shipping work as a series of
+small, independently-verifiable commits — each one **gated by an AI code-review loop** — and, before
+that, for deciding *what the work even is*. The model work is spread across an intelligence ladder
+(kimi → minimax → sonnet → glm → gpt → opus): all but Claude run through the
 [cline CLI](https://docs.cline.bot/usage/cli-overview); Claude uses the
 [Claude Code CLI](https://code.claude.com/docs/en/cli-reference).
 
 | Skill | Invoke | Does |
 |---|---|---|
-| `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. |
+| `gated-plan-brainstorm` | `/gated-plan-brainstorm <topic>` | Runs a simulated design meeting on a subjective, open-ended topic: a chair casts a roster of deliberately-clashing personas (each backed by one difficulty-matched ladder model, read-only) and drives them through opening positions → debate rounds → convergence → an objections pass, then writes a decision brief to `docs/brainstorms/<topic>.md`. |
+| `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. Takes a brainstorm brief or a raw task as input. |
 | `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a difficulty-sized coding agent** (ladder kimi → minimax → sonnet → glm → gpt → opus) — reviewed by one reviewer difficulty-matched one tier above the implementer on the same ladder (read-only, same quota/auth fallback) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
 
-The two compose: **create → execute**. The only coupling is the YAML schema — `create` emits exactly
-what `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do` scope, a `gate`, and
-a `done` flag).
+They compose: **brainstorm → create → execute**. `brainstorm` is optional — start there when the
+direction is still subjective; skip straight to `create` when the work is already concrete. The
+coupling is light: `brainstorm` writes a markdown brief that `create` reads, and `create` emits
+exactly the YAML schema `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do`
+scope, a `gate`, and a `done` flag).
 
 ## Requirements
 
@@ -52,8 +55,9 @@ a `done` flag).
 
 ```
 git clone https://github.com/mradulme/gated-plan-skills.git
-ln -s "$PWD/gated-plan-skills/skills/gated-plan-create"  ~/.claude/skills/gated-plan-create
-ln -s "$PWD/gated-plan-skills/skills/gated-plan-execute" ~/.claude/skills/gated-plan-execute
+ln -s "$PWD/gated-plan-skills/skills/gated-plan-brainstorm" ~/.claude/skills/gated-plan-brainstorm
+ln -s "$PWD/gated-plan-skills/skills/gated-plan-create"     ~/.claude/skills/gated-plan-create
+ln -s "$PWD/gated-plan-skills/skills/gated-plan-execute"    ~/.claude/skills/gated-plan-execute
 ```
 
 Skills load at session start — start a fresh Claude Code session after installing.
@@ -61,8 +65,11 @@ Skills load at session start — start a fresh Claude Code session after install
 ## Usage
 
 ```
+/gated-plan-brainstorm should we split the auth service out of the monolith?
+#   → runs the meeting, writes docs/brainstorms/<topic>.md (skip this step if the work is already concrete)
+
 /gated-plan-create add full test + lint + typecheck coverage to the app
-#   → writes docs/plans/<name>.yaml
+#   → writes docs/plans/<name>.yaml (can take the brainstorm brief as input)
 
 /gated-plan-execute docs/plans/<name>.yaml
 #   → runs phase 1 (branch, commit each item, review-gated), reports, asks before the next phase
