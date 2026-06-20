@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the difficulty-matched coding agent (intelligence ladder kimi → minimax → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode; on a quota/auth miss it falls through to the next model in the same stage so an unavailable model never blocks the item), gate each commit on a review loop, then gate the whole branch vs main — review tries gpt-5.5, GLM-5.2, Claude Sonnet, MiniMax-M3, then Kimi (cline for all but Claude), using the first with quota',
+  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the difficulty-matched coding agent (intelligence ladder kimi → minimax → sonnet → glm → gpt → opus, via cline act-mode or claude write-mode; on a quota/auth miss it falls through to the next model in the same stage so an unavailable model never blocks the item), gate each commit on a review loop, then gate the whole branch vs main — the reviewer is difficulty-matched one tier ABOVE the implementer on the same ladder (read-only: cline plan-mode, claude allowedTools whitelist), with the same quota/auth fallback',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -60,21 +60,19 @@ const GATE = {
   },
 }
 
-// Reviewer FALLBACK order — exactly ONE reviewer runs per review; the next is tried ONLY if the
-// current one can't review. Not parallel, not stacked. All are AGENTIC — each explores
-// the repo with its own tools (runs git, reads files); we never hand it a pre-dumped diff. All assumed
-// preconfigured (cline providers logged in / claude logged in — never set keys/models here). Each
-// prints findings as text, so one classifier handles all. The chain falls through to the next reviewer
-// ONLY when the current one can't review because it's out of credits/quota/rate-limit/auth (for cline
-// this often shows up as an unauthenticated / not-logged-in / expired-token error — treat that as quota):
-//   1. gpt-5.5        — cline -p -P openai-codex    -m gpt-5.5
-//   2. GLM-5.2        — cline -p -P zai-coding-plan -m glm-5.2
-//   3. Claude (Sonnet)— claude -p --model claude-sonnet-4-6, read-only tool whitelist (spends main Claude credits)
-//   4. MiniMax-M3     — cline -p -P minimax         -m MiniMax-M3 --thinking high
-//   5. Kimi           — cline -p -P moonshot        -m kimi-k2.7-code  (LAST)
-// cline `-p` is PLAN MODE: it investigates but cannot edit (our read-only enforcement). claude `-p` is
-// print mode; its read-only comes from --allowedTools. Absolute paths: the review shell doesn't source
-// ~/.zshrc. No --json (it re-emits every event — token bloat); redirect to a temp file and tail it.
+// Reviewer = the SAME ladder as impl (below), invoked READ-ONLY and difficulty-matched ONE TIER ABOVE
+// the model that implemented the item — so a smarter model reviews and it is never the author. Exactly
+// ONE reviewer runs per review; the next is tried ONLY if the current can't review. Not parallel, not
+// stacked. All are AGENTIC — each explores the repo with its own tools (runs git, reads files); we never
+// hand it a pre-dumped diff. All assumed preconfigured (cline providers logged in / claude logged in —
+// never set keys/models here). Each prints findings as text, so one classifier handles all. The chain
+// falls through to the next ladder model (candidatesFor: chosen tier, then up, then down) ONLY when the
+// current one can't review because it's out of credits/quota/rate-limit/auth (for cline this often shows
+// up as an unauthenticated / not-logged-in / expired-token error — treat that as quota). cline `-p` is
+// PLAN MODE: it investigates but cannot edit (our read-only enforcement); claude `-p` is print mode, its
+// read-only coming from --allowedTools. Absolute paths: the review shell doesn't source ~/.zshrc. No
+// --json (it re-emits every event — token bloat); redirect to a temp file and tail it. See reviewCmd /
+// reviewAgent below.
 const CLINE = '/opt/homebrew/bin/cline'
 const CLAUDE = '$HOME/.local/bin/claude'
 
@@ -88,18 +86,19 @@ const CLAUDE = '$HOME/.local/bin/claude'
 // chain. thinking=high throughout; tiers 3 + 6 are Claude → spend main Claude credits; 1/2/4/5 use cline
 // provider plans (each with an EXPLICIT -P provider — never the bare default `cline` provider):
 const LADDER = [
-  { tier: 1, name: 'kimi-k2.7', score: 42, kind: 'cline', base: `${CLINE} -P moonshot -m kimi-k2.7-code` },
-  { tier: 2, name: 'minimax-m3', score: 44, kind: 'cline', base: `${CLINE} -P minimax -m MiniMax-M3 --thinking high` },
+  { tier: 1, name: 'kimi-k2.7', score: 42, kind: 'cline', args: '-P moonshot -m kimi-k2.7-code' },
+  { tier: 2, name: 'minimax-m3', score: 44, kind: 'cline', args: '-P minimax -m MiniMax-M3 --thinking high' },
   { tier: 3, name: 'claude-sonnet-4-6', score: 47, kind: 'claude', model: 'claude-sonnet-4-6' },
-  { tier: 4, name: 'glm-5.2', score: 51, kind: 'cline', base: `${CLINE} -P zai-coding-plan -m glm-5.2 --thinking high` },
-  { tier: 5, name: 'gpt-5.5', score: 54, kind: 'cline', base: `${CLINE} -P openai-codex -m gpt-5.5 --thinking high` },
+  { tier: 4, name: 'glm-5.2', score: 51, kind: 'cline', args: '-P zai-coding-plan -m glm-5.2 --thinking high' },
+  { tier: 5, name: 'gpt-5.5', score: 54, kind: 'cline', args: '-P openai-codex -m gpt-5.5 --thinking high' },
   { tier: 6, name: 'claude-opus-4-8', score: 56, kind: 'claude', model: 'claude-opus-4-8' },
 ]
 const clampTier = (t) => Math.max(1, Math.min(LADDER.length, Math.round(t) || 1))
-// Difficulty 1-5 → starting tier on the score ladder. minimax (tier 2, intelligence score 44) sits
-// between kimi and sonnet and is reached via fallback/escalation; difficulty maps to the original five
-// primaries so existing ratings behave unchanged. Default difficulty 3 → tier 4 (glm).
-const DIFF_TIER = { 1: 1, 2: 3, 3: 4, 4: 5, 5: 6 }
+// Difficulty 1-5 → impl tier on the score ladder, 1:1 onto the first five tiers (kimi, minimax, sonnet,
+// glm, gpt). Opus (tier 6) is reached as a primary only to REVIEW difficulty-5 items (review = impl+1,
+// below) and as the fix/branch escalation ceiling. No default model — the orchestrator always rates
+// difficulty; the clamp only guards a missing/garbage value.
+const DIFF_TIER = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5 }
 const tierFor = (difficulty) => DIFF_TIER[Math.max(1, Math.min(5, Math.round(difficulty) || 3))]
 // Difficulty picks the PRIMARY model; the rest of the ladder are fallbacks tried (in the same stage)
 // ONLY when the current model is unavailable (out of quota/auth) — never to "second-guess" a model that
@@ -114,13 +113,20 @@ const candidatesFor = (tier) => {
   for (let i = t - 1; i >= 1; i--) down.push(LADDER[i - 1])
   return [LADDER[t - 1], ...up, ...down]
 }
-// The shell line that feeds <taskfile> to a candidate as its prompt in write/act mode, redirecting to
-// <out> and tailing it. "$(cat ...)" passes arbitrary task text (backticks/$/quotes/newlines) as one
-// arg the shell does not re-interpret.
+// WRITE/ACT mode: feed <taskfile> to a candidate as its prompt, redirect to <out> and tail it.
+// "$(cat ...)" passes arbitrary task text (backticks/$/quotes/newlines) as one arg the shell does not
+// re-interpret. cline ACT mode (no -p) auto-approves its tools; claude writes via bypassPermissions.
 const candidateCmd = (m, taskfile, out) =>
   m.kind === 'cline'
-    ? `${m.base} "$(cat ${taskfile})" > ${out} 2>&1; tail -n 120 ${out}`
+    ? `${CLINE} ${m.args} "$(cat ${taskfile})" > ${out} 2>&1; tail -n 120 ${out}`
     : `${CLAUDE} --model ${m.model} -p "$(cat ${taskfile})" --permission-mode bypassPermissions > ${out} 2>&1; tail -n 120 ${out}`
+// READ-ONLY mode (review): same candidate, but it can investigate yet not edit. cline -p is PLAN mode;
+// claude is held read-only by an --allowedTools whitelist. <prompt> is backtick/$/quote-free (see `p`
+// below) so it embeds safely in the double-quoted shell arg. cline redirects+tails; claude prints direct.
+const reviewCmd = (m, prompt, out) =>
+  m.kind === 'cline'
+    ? `${CLINE} -p ${m.args} "${prompt}" > ${out} 2>&1; tail -n 120 ${out}`
+    : `${CLAUDE} -p "${prompt}" --model ${m.model} --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"`
 
 const DELEGATE = {
   type: 'object',
@@ -178,7 +184,11 @@ const implTask = (item) =>
   `(run the specific check it names — the project's lint/typecheck/test command), \`git add\` + \`git commit\` ` +
   `with a conventional message + the repo's Co-Authored-By trailer. If already satisfied, make no commit.`
 
-const reviewAgent = (target, label) => {
+// The reviewer is difficulty-matched on the SAME ladder as impl — picked ONE TIER ABOVE the model that
+// implemented the item (a smarter model reviews, and it is never the model that wrote the code), capped
+// at opus. `tier` is that review tier; candidatesFor(tier) gives the read-only fallback chain (chosen
+// tier, then up, then down) used ONLY when the current model is out of quota/auth — not a fixed default.
+const reviewAgent = (target, label, tier) => {
   const scopeMd =
     target === 'branch'
       ? `this branch vs \`${reviewBase}\` (the changes in \`git diff ${reviewBase}...HEAD\`)`
@@ -195,27 +205,27 @@ const reviewAgent = (target, label) => {
     `correctness. Run git (e.g. git diff ${ref}) and read the surrounding code as needed — investigate, ` +
     `do not just skim. List P1 (must-fix: bug, regression, security, data loss) and P2 (correctness risk, ` +
     `missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
+  const cands = candidatesFor(tier)
+  const cmdList = cands
+    .map((m, i) => `  ${i + 1}. ${m.name} (tier ${m.tier}): ${reviewCmd(m, p, tmp(m.tier))}`)
+    .join('\n')
   return agent(
-    `On branch \`${branch}\`, review ${scopeMd}. Try these reviewers STRICTLY ONE AT A TIME, IN ORDER. ` +
-      `Run exactly ONE reviewer command per Bash call (Bash timeout 600000 ms), WAIT for it to finish, then ` +
-      `decide. NEVER run two reviewers in parallel — no parallel Bash calls. Each CLINE command (1, 2, 4, 5) ` +
-      `redirects to its own temp file and tails it: read ONLY that tail (the final findings) — do NOT use ` +
-      `--json (it dumps the whole event stream); claude (3) prints its final answer directly, no redirect. ` +
+    `On branch \`${branch}\`, review ${scopeMd}. Difficulty matched ${cands[0].name} (tier ${cands[0].tier}, ` +
+      `one tier above the implementer) as the reviewer; the rest below are fallbacks used ONLY if the current ` +
+      `one is UNAVAILABLE. Try them STRICTLY ONE AT A TIME, IN ORDER, exactly as written (absolute paths — the ` +
+      `shell does not source ~/.zshrc). Run exactly ONE reviewer command per Bash call (Bash timeout 600000 ms), ` +
+      `WAIT for it to finish, then decide. NEVER run two reviewers in parallel. Each cline command redirects to ` +
+      `its own temp file and tails it: read ONLY that tail (the final findings) — do NOT use --json (it dumps ` +
+      `the whole event stream); claude prints its final answer directly, no redirect. cline runs in PLAN MODE ` +
+      `(-p) so it investigates but cannot edit; claude is read-only via --allowedTools. Each is agentic — let it ` +
+      `explore the repo; do not pre-dump the diff:\n\n${cmdList}\n\n` +
       `Classify the output of the FIRST that produces a review and STOP (do not run the others). ` +
       `Move to the next ONLY if the current one fails because it cannot review — out of credits/quota/rate-limit, ` +
       `OR (for cline) an auth / unauthenticated / not-logged-in / expired-or-invalid-token error, which is how ` +
       `cline surfaces an exhausted plan (observed examples: a single-line "error: The usage limit has been ` +
       `reached" or "error: Invalid Authentication", exit 1). Do NOT fall through because it found issues (that ` +
-      `is a valid review) or for any other error. cline runs in PLAN MODE (-p) so it investigates but cannot edit; claude is read-only ` +
-      `via --allowedTools. Use the absolute paths verbatim (the shell does not source ~/.zshrc). Each is agentic ` +
-      `— let it explore the repo; do not pre-dump the diff:\n\n` +
-      `  1. gpt-5.5:  ${CLINE} -p -P openai-codex -m gpt-5.5 "${p}" > ${tmp(1)} 2>&1; tail -n 120 ${tmp(1)}\n` +
-      `  2. GLM-5.2:  ${CLINE} -p -P zai-coding-plan -m glm-5.2 "${p}" > ${tmp(2)} 2>&1; tail -n 120 ${tmp(2)}\n` +
-      `  3. Claude Sonnet (spends main Claude credits): ${CLAUDE} -p "${p}" --model claude-sonnet-4-6 --allowedTools "Bash(git:*)" "Read" "Grep" "Glob"\n` +
-      `  4. MiniMax-M3: ${CLINE} -p -P minimax -m MiniMax-M3 --thinking high "${p}" > ${tmp(4)} 2>&1; tail -n 120 ${tmp(4)}\n` +
-      `  5. Kimi (LAST): ${CLINE} -p -P moonshot -m kimi-k2.7-code "${p}" > ${tmp(5)} 2>&1; tail -n 120 ${tmp(5)}\n\n` +
-      `Assume all are configured and logged in — do NOT configure keys/models. Whichever runs prints ` +
-      `findings as text. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
+      `is a valid review) or for any other error. Assume all are configured and logged in — do NOT configure ` +
+      `keys/models. Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and ` +
       `P2 (should-fix: correctness risk, missing edge case). Ignore P3/nits/style. Edit nothing. If EVERY reviewer ` +
       `fails (all out of quota/auth) and none produces a review, do NOT return an empty/clean result (empty p1/p2 ` +
       `reads as a clean pass) — return a single P1 "NO REVIEWER AVAILABLE: all reviewers out of quota/auth — code ` +
@@ -236,6 +246,7 @@ const unresolved = []
 
 for (const item of items) {
   const baseTier = tierFor(item.difficulty)
+  const reviewTier = clampTier(baseTier + 1) // review one tier above the implementer (never self-review), capped at opus
   let escalations = 0 // each failed round bumps the fix one tier up the ladder (capped at the top tier)
   const fixTier = () => clampTier(baseTier + escalations)
 
@@ -272,7 +283,7 @@ for (const item of items) {
       gateRed = false
     }
 
-    const review = await reviewAgent('commit', `review:${item.label}#${round}`)
+    const review = await reviewAgent('commit', `review:${item.label}#${round}`, reviewTier)
     blockers = [...(review?.p1 || []), ...(review?.p2 || [])]
     if (!blockers.length) {
       log(`✓ ${item.label}: gate green + review clean (round ${round})`)
@@ -295,13 +306,13 @@ for (const item of items) {
 // per-commit gates can't see. Loop-fix like the per-commit gate, then hand back for the merge decision.
 let branchBlockers = []
 {
-  // Cross-commit fixes are subtle — start near the top of the ladder (max item tier, min gpt) and
-  // escalate to the top tier across the ≤3 rounds.
-  const branchBase = clampTier(Math.max(tierFor(4), ...items.map((it) => tierFor(it.difficulty))))
+  // Cross-commit fixes are subtle — fix starts near the top of the ladder (max item tier, floored at
+  // gpt=5) and escalates to opus across the ≤3 rounds; review runs one tier above that (so opus).
+  const branchBase = clampTier(Math.max(5, ...items.map((it) => tierFor(it.difficulty))))
   let round = 0
   while (round < BRANCH_MAX) {
     round++
-    const review = await reviewAgent('branch', `branch-review#${round}`)
+    const review = await reviewAgent('branch', `branch-review#${round}`, clampTier(branchBase + 1))
     branchBlockers = [...(review?.p1 || []), ...(review?.p2 || [])]
     if (!branchBlockers.length) {
       log(`✓ branch ${branch}: clean vs ${reviewBase} (round ${round})`)

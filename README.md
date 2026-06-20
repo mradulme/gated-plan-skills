@@ -10,7 +10,7 @@ with quota), looping until there are no P1/P2 findings. All but Claude run throu
 | Skill | Invoke | Does |
 |---|---|---|
 | `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. |
-| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a difficulty-sized coding agent** (ladder kimi → sonnet → glm → gpt → opus) — reviews via one reviewer (fallback order gpt-5.5 → GLM-5.2 → Claude Sonnet → Kimi) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
+| `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a difficulty-sized coding agent** (ladder kimi → minimax → sonnet → glm → gpt → opus) — reviewed by one reviewer difficulty-matched one tier above the implementer on the same ladder (read-only, same quota/auth fallback) and loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
 
 The two compose: **create → execute**. The only coupling is the YAML schema — `create` emits exactly
 what `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do` scope, a `gate`, and
