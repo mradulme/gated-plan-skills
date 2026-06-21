@@ -45,17 +45,17 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
 
    **Optional sounding board (advisory only).** When a phasing or splitting call in steps 3–4 is
    genuinely hard — an ambiguous root-cause clustering, an unclear dependency order, "is this one
-   commit or three?" — you MAY consult a second model for discussion. Both run **plan mode only**
-   (`-p`, read-only — they investigate the repo and reason, they cannot edit), absolute path (the
-   shell doesn't source `~/.zshrc`), redirect to a temp file and read the `tail` (no `--json` — token
-   bloat):
-   - gpt-5.5: `/opt/homebrew/bin/cline -p -P openai-codex -m gpt-5.5 --thinking high "<question>" > /tmp/gpc-gpt.txt 2>&1; tail -n 120 /tmp/gpc-gpt.txt`
-   - GLM-5.2: `/opt/homebrew/bin/cline -p -P zai-coding-plan -m glm-5.2 --thinking high "<question>" > /tmp/gpc-glm.txt 2>&1; tail -n 120 /tmp/gpc-glm.txt`
+   commit or three?" — you MAY consult the Cursor agent for a second opinion. Run it **read-only**
+   (`-p --trust`, no `--force` — it investigates the repo and reasons but cannot edit; it auto-routes
+   a model and uses Cursor's codebase index), absolute path (the shell doesn't source `~/.zshrc`),
+   redirect to a temp file and read the `tail` (output is the final answer only — no `--json`):
+   - `/Users/mradul/.local/bin/agent -p --trust "<question>" > /tmp/gpc-sounding.txt 2>&1; tail -n 120 /tmp/gpc-sounding.txt`
 
    This is a sanity check, not a vote. Ask only when it earns the round-trip; **you are the final
-   decider** — weigh what they say, take what's useful, discard the rest. Don't consult on easy calls,
-   don't defer to them, don't paste their output into the plan verbatim. If a provider is out of
-   quota/auth, just skip it and decide yourself. Assume cline is preconfigured — never set keys/models.
+   decider** — weigh what it says, take what's useful, discard the rest. Don't consult on easy calls,
+   don't defer to it, don't paste its output into the plan verbatim. If the agent is unavailable
+   (connection/quota/auth), just skip it and decide yourself. Assume the Cursor agent is preconfigured
+   — never set keys/models.
 
 5. **Write the YAML** in the schema below to `docs/plans/<kebab-name>.yaml`. Then tell the user to
    run `gated-plan-execute docs/plans/<file>.yaml`. Don't start implementing — this skill only plans.

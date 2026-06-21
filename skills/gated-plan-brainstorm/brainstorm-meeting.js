@@ -1,7 +1,7 @@
 export const meta = {
   name: 'brainstorm-meeting',
   description:
-    'Run a simulated design meeting on a subjective topic: a chair (this workflow) casts a roster of clashing personas, each backed by one difficulty-matched model on the intelligence ladder (kimi → minimax → sonnet → glm → gpt, via cline plan-mode / claude read-only, with quota/auth fallback), then drives them through opening positions → facilitator-mediated debate rounds → convergence → a final objections pass, and writes a decision brief that gated-plan-create can consume',
+    'Run a simulated design meeting on a subjective topic: a chair (this workflow) casts a roster of clashing personas, each voiced by the Cursor agent CLI (headless -p --trust, read-only — auto-routed model that may read the repo to ground its view), then drives them through opening positions → facilitator-mediated debate rounds → convergence → a final objections pass, and writes a decision brief that gated-plan-create can consume',
   whenToUse:
     'Invoked by the gated-plan-brainstorm skill to deliberate an open-ended question into concrete decisions/directions before planning',
   phases: [
@@ -23,41 +23,16 @@ const slug =
   String(topic).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'brainstorm'
 const briefPath = `${outDir}/${slug}.md`
 
-// ---- Intelligence ladder, copied from gated-plan-execute/phase-review-loop.js. Each skill is
-// standalone (repo convention — a shared lib would be the over-engineering they already avoided), so
-// the ladder + CLI invocation + quota/auth fallback are duplicated here verbatim. Tiers ascend by score.
-const CLINE = '/opt/homebrew/bin/cline'
-const CLAUDE = '$HOME/.local/bin/claude'
-const LADDER = [
-  { tier: 1, name: 'kimi-k2.7', score: 42, kind: 'cline', args: '-P moonshot -m kimi-k2.7-code' },
-  { tier: 2, name: 'minimax-m3', score: 44, kind: 'cline', args: '-P minimax -m MiniMax-M3 --thinking high' },
-  { tier: 3, name: 'claude-sonnet-4-6', score: 47, kind: 'claude', model: 'claude-sonnet-4-6' },
-  { tier: 4, name: 'glm-5.2', score: 51, kind: 'cline', args: '-P zai-coding-plan -m glm-5.2 --thinking high' },
-  { tier: 5, name: 'gpt-5.5', score: 54, kind: 'cline', args: '-P openai-codex -m gpt-5.5 --thinking high' },
-  { tier: 6, name: 'claude-opus-4-8', score: 56, kind: 'claude', model: 'claude-opus-4-8' },
-]
-const clampTier = (t) => Math.max(1, Math.min(LADDER.length, Math.round(t) || 1))
-// Topic difficulty 1-5 → the single tier that backs EVERY persona (the chair, on the session model, is
-// effectively the top of the ladder). Opus (tier 6) is never a persona — it chairs.
-const tierFor = (difficulty) => ({ 1: 1, 2: 2, 3: 3, 4: 4, 5: 5 }[Math.max(1, Math.min(5, Math.round(difficulty) || 3))])
-// Quota/auth fallback order: chosen tier, then higher tiers ascending, then lower descending — so an
-// unavailable model degrades to the nearest equal-or-stronger first and can never silently block a turn.
-const candidatesFor = (tier) => {
-  const t = clampTier(tier)
-  const up = []
-  for (let i = t + 1; i <= LADDER.length; i++) up.push(LADDER[i - 1])
-  const down = []
-  for (let i = t - 1; i >= 1; i--) down.push(LADDER[i - 1])
-  return [LADDER[t - 1], ...up, ...down]
-}
-// READ-ONLY invocation. The persona prompt (topic + transcript) carries arbitrary text, so it is written
-// to a temp file and passed via "$(cat ...)" — the shell does not re-interpret backticks/$/quotes/newlines.
-// cline -p is PLAN mode (investigates, cannot edit); claude is held read-only by --allowedTools. No --json
-// (it re-emits every event — token bloat); redirect to a temp file and tail it.
-const readCmd = (m, pf, out) =>
-  m.kind === 'cline'
-    ? `${CLINE} -p ${m.args} "$(cat ${pf})" > ${out} 2>&1; tail -n 120 ${out}`
-    : `${CLAUDE} -p "$(cat ${pf})" --model ${m.model} --allowedTools "Bash(git:*)" "Read" "Grep" "Glob" > ${out} 2>&1; tail -n 120 ${out}`
+// ---- Backend: Cursor's `agent` CLI, headless, read-only (-p --trust, no --force) — every persona turn
+// is voiced by it. No -m/--model: Cursor auto-routes a model and may use its codebase index to ground a
+// persona's view. Copied (not shared) into each skill by repo convention — a shared lib would be the
+// over-engineering they already avoid. The persona prompt (topic + transcript) carries arbitrary text,
+// so it is written to a temp file and passed via "$(cat ...)" — the shell does not re-interpret
+// backticks/$/quotes/newlines. --output-format defaults to text (final answer only) so no --json bloat;
+// redirect to a temp file and tail it. Absolute path: the shell doesn't source ~/.zshrc. --trust is
+// required even read-only — headless aborts on an untrusted workspace; with no --force, edits never apply.
+const AGENT = '/Users/mradul/.local/bin/agent'
+const readCmd = (pf, out) => `${AGENT} -p --trust "$(cat ${pf})" > ${out} 2>&1; tail -n 120 ${out}`
 
 const SPEAK = {
   type: 'object',
@@ -68,10 +43,9 @@ const SPEAK = {
 const CAST = {
   type: 'object',
   additionalProperties: false,
-  required: ['centralQuestion', 'difficulty', 'personas'],
+  required: ['centralQuestion', 'personas'],
   properties: {
     centralQuestion: { type: 'string' },
-    difficulty: { type: 'integer' },
     personas: {
       type: 'array',
       items: {
@@ -101,11 +75,6 @@ const FINAL = {
   properties: { briefPath: { type: 'string' }, summary: { type: 'string' } },
 }
 
-// The single tier backing every persona this meeting — set by the chair's difficulty rating in Cast.
-// ponytail: single difficulty-matched tier (the user's choice); to mix ladder models per persona for more
-// idea-diversity, give each persona its own tier and call candidatesFor(thatTier) inside speak().
-let tier = 3
-
 const personaBrief = (p) => `${p.name} — ${p.role}.\nYour stance / bias (argue from this): ${p.stance}`
 
 const renderTranscript = (t) => {
@@ -127,61 +96,53 @@ const renderSynth = (s) => {
   )
 }
 
-// Relay ONE persona turn to a read-only CLI model. Like gated-plan-execute's reviewer, but the prompt is
-// file-fed (arbitrary transcript text) and the model speaks IN CHARACTER instead of reviewing.
+// Relay ONE persona turn to the read-only Cursor agent. Like gated-plan-execute's reviewer, but the
+// prompt is file-fed (arbitrary transcript text) and the model speaks IN CHARACTER instead of reviewing.
 const speak = (persona, body, label, phaseLabel) => {
   const lslug = label.replace(/[^a-z0-9]+/gi, '-')
   const pf = `/tmp/gpb-prompt-${lslug}.txt`
-  const cands = candidatesFor(tier)
-  const cmdList = cands
-    .map((m, i) => `  ${i + 1}. ${m.name} (tier ${m.tier}): ${readCmd(m, pf, `/tmp/gpb-out-${lslug}-${m.tier}.txt`)}`)
-    .join('\n')
+  const out = `/tmp/gpb-out-${lslug}.txt`
   const full =
     `You are a participant in a live design brainstorm meeting. Stay FULLY in character as this persona and ` +
     `argue from its viewpoint — do not be a neutral assistant:\n\n${persona}\n\n${body}\n\n` +
     `Keep it to a few focused paragraphs. Be concrete and cite specifics (you may read the repo to ground your view) ` +
     `over generalities.`
   return agent(
-    `You are relaying ONE turn of a brainstorm meeting to a read-only CLI model — do NOT answer yourself. First write ` +
-      `the meeting prompt (given at the END, after the marker) VERBATIM to ${pf} using the Write tool, so ` +
-      `backticks/$/quotes/newlines are preserved exactly. Then try the commands below STRICTLY ONE AT A TIME, IN ORDER, ` +
-      `each exactly as written (absolute paths — the shell does not source ~/.zshrc), with Bash timeout 600000 ms. Each is ` +
-      `READ-ONLY (cline in PLAN mode -p; claude held by --allowedTools) — the model may read repo files to ground itself ` +
-      `but edits nothing. Do NOT pass --json. Read ONLY the tail.\n\n${cmdList}\n\n` +
-      `Decide after each command:\n` +
-      `• It produced the persona's contribution → STOP, return { text:<the model's full response, verbatim>, ` +
-      `model:<that model's name> }.\n` +
-      `• It could NOT run — out of credits/quota/rate-limit, OR (for cline) an auth/unauthenticated/expired-or-invalid-token ` +
-      `error (e.g. a single line "error: The usage limit has been reached" or "error: Invalid Authentication", exit 1) → ` +
-      `that model is UNAVAILABLE: move to the NEXT command and try again.\n` +
-      `If EVERY candidate is unavailable, return { text:"(no model available to speak this turn)", model:"none" }.` +
+    `You are relaying ONE turn of a brainstorm meeting to the read-only Cursor agent CLI — do NOT answer yourself. First ` +
+      `write the meeting prompt (given at the END, after the marker) VERBATIM to ${pf} using the Write tool, so ` +
+      `backticks/$/quotes/newlines are preserved exactly. Then run this command EXACTLY as written (absolute path — the ` +
+      `shell does not source ~/.zshrc), with Bash timeout 600000 ms. It is READ-ONLY (-p --trust, no --force: Cursor ` +
+      `auto-routes a model that may read repo files to ground itself but edits nothing). Output is the final answer only ` +
+      `— read ONLY the tail; do NOT pass --json.\n\n` +
+      `  ${readCmd(pf, out)}\n\n` +
+      `Then decide:\n` +
+      `• It produced the persona's contribution → return { text:<the model's full response, verbatim>, model:"cursor-agent" }.\n` +
+      `• It could NOT run — connection lost / "exceeded max retries" / out of quota / auth error → ` +
+      `return { text:"(no model available to speak this turn)", model:"none" }.` +
       `\n\n--- MEETING PROMPT (write this verbatim to ${pf}) ---\n${full}`,
     { label, phase: phaseLabel, schema: SPEAK }
   )
 }
 
-// ---- 1. Cast: the chair sharpens the question, casts the roster, and rates difficulty → tier ----
+// ---- 1. Cast: the chair sharpens the question and casts the roster ----
 phase('Cast')
 const cast = await agent(
   `You are the CHAIR of a design brainstorm meeting. Topic:\n\n${topic}\n\n` +
-    `Do three things. (1) Sharpen the topic into ONE crisp central question the meeting must answer. ` +
+    `Do two things. (1) Sharpen the topic into ONE crisp central question the meeting must answer. ` +
     `(2) Cast a roster of 3–${maxPersonas} personas to debate it, with DELIBERATELY CLASHING stances so the debate is ` +
     `real, not an echo chamber. Match the KIND of persona to the topic: for an engineering/design/technical question, ` +
     `cast domain-expert stance archetypes (e.g. architect vs pragmatist SRE vs velocity-advocate vs security lead vs ` +
     `migration-scarred skeptic) — the clash is HOW to think about the problem. For a cross-functional/business/strategy ` +
     `question, cast role/stakeholder voices including C-suite where apt (e.g. CTO vs CMO vs CPO vs CFO vs a ` +
     `customer-success voice) — the clash is WHOSE interest wins. Pick whichever fits; mix them if the topic genuinely ` +
-    `spans both. Give each a short name, a role, and a one-line stance/bias they argue from. (3) Rate the topic's ` +
-    `difficulty 1–5 (1 = light/low-stakes, 5 = deep, ` +
-    `high-stakes, ambiguous, architecturally loaded) — this picks the single model tier backing every persona. ` +
-    `Return { centralQuestion, difficulty, personas:[{name,role,stance}] }.`,
+    `spans both. Give each a short name, a role, and a one-line stance/bias they argue from. ` +
+    `Return { centralQuestion, personas:[{name,role,stance}] }.`,
   { label: 'cast', phase: 'Cast', schema: CAST }
 )
 const personas = (cast.personas || []).slice(0, maxPersonas)
 if (personas.length < 2) throw new Error('chair cast fewer than 2 personas — cannot hold a debate')
 const centralQuestion = cast.centralQuestion
-tier = tierFor(cast.difficulty)
-log(`Cast ${personas.length} personas at tier ${tier} (${LADDER[tier - 1].name}); Q: ${centralQuestion}`)
+log(`Cast ${personas.length} personas (Cursor agent, auto-routed); Q: ${centralQuestion}`)
 
 // ---- 2. Open: each persona states an opening position (parallel), chair synthesizes ----
 phase('Open')
