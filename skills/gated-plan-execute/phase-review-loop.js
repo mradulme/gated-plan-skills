@@ -118,7 +118,17 @@ const delegate = (task, label) => {
 // Self-contained impl instructions handed to the delegated coding agent for one item.
 const implTask = (item) =>
   `${contextBlock}You are working on git branch \`${branch}\`. Implement EXACTLY this one checklist item, nothing else:\n\n${item.prompt}\n\n` +
-  `Follow repo conventions (TDD where adding behavior). When the item is done AND its named gate is green ` +
+  `Follow repo conventions (TDD where adding behavior). Be lazy in the disciplined sense: write the ` +
+  `SHORTEST diff that works — prefer the stdlib, a native platform feature, or an already-installed ` +
+  `dependency over new code; deletion over addition; no speculative abstraction, config, or scaffolding ` +
+  `for a need that is not here yet. Mark a deliberate shortcut with a brief comment naming its ceiling. ` +
+  `Never simplify away input validation at trust boundaries, error handling, security, or accessibility. ` +
+  `If this item builds or reshapes user-facing UI, make it distinctive rather than templated: avoid the ` +
+  `default AI looks (cream + serif + terracotta; near-black + acid-green; generic hairline broadsheet), ` +
+  `choose typography and ONE signature element deliberately and keep everything around it quiet, respect ` +
+  `a quality floor (responsive, visible keyboard focus, prefers-reduced-motion), and write UI copy from ` +
+  `the user's side in active voice with the same action name through a flow ("Publish" then "Published"). ` +
+  `When the item is done AND its named gate is green ` +
   `(run the specific check it names — the project's lint/typecheck/test command), \`git add\` + \`git commit\` ` +
   `with a conventional message + the repo's Co-Authored-By trailer. If already satisfied, make no commit.`
 

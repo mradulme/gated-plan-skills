@@ -11,10 +11,15 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
 
 ## Procedure
 
-1. **Understand the task — and question it.** If the ask is fuzzy or design-level, run the
-   `brainstorming` skill first. Don't plan past real ambiguity — ask. Then apply YAGNI at the plan
-   level: if part of the ask is speculative ("might need…", "for later"), plan only what's needed
-   now and list the rest under `excluded`. The best commit is the one never written.
+1. **Understand the task — and question it (brainstorm intent first).** Explore the project context
+   (relevant files, docs, recent commits) before proposing anything. If the ask is fuzzy or
+   design-level, don't plan past real ambiguity — ask clarifying questions **one at a time** (prefer
+   multiple-choice), focused on purpose, constraints, and success criteria, and propose **2–3
+   approaches with trade-offs and your recommendation** before settling on one. Get alignment on the
+   direction before splitting into commits. For a genuinely open/subjective direction ("what should we
+   even build here?"), run `gated-plan-brainstorm` first. Then apply YAGNI at the plan level: if part
+   of the ask is speculative ("might need…", "for later"), plan only what's needed now and list the
+   rest under `excluded`. The best commit is the one never written.
 
 2. **Get ground truth, don't guess.** Run the relevant read-only diagnostics so item sizing is
    real, not imagined: counts and concrete lists (e.g. `tsc --noEmit | grep -c error`, the failing
@@ -38,10 +43,12 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
      commit"). If you can't name the gate, the item is too vague.
    - **lazy** — each item must earn its place. Run it up the ladder before it goes in the plan:
      does it need to exist at all? does the stdlib / a native platform feature / an already-installed
-     dep cover it before any new code? is the scope the shortest diff that works, deletion before
-     addition? Stop at the first rung that holds. Drop items that don't survive — the right plan is
-     the **fewest commits that ship the goal**, not the most granular. Granularity (above) is for
-     real work measured in step 2; it is never padding.
+     dep cover it before any new code? is the scope the shortest diff that works — deletion before
+     addition, boring over clever? Stop at the first rung that holds. Drop items that don't survive —
+     the right plan is the **fewest commits that ship the goal**, not the most granular. Granularity
+     (above) is for real work measured in step 2; it is never padding. Where an item ships a deliberate
+     shortcut (a known ceiling), say so in its `do` so the implementer marks it in code rather than
+     gold-plating.
 
    **Optional sounding board (advisory only).** When a phasing or splitting call in steps 3–4 is
    genuinely hard — an ambiguous root-cause clustering, an unclear dependency order, "is this one
