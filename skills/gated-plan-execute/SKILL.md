@@ -50,6 +50,8 @@ file); this skill parses the YAML and drives it phase-by-phase.
        base: '<yaml base, default release>',
        reviewBase: '<yaml reviewBase, default main>',   // the final branch gate reviews against this
        maxRounds: 7,
+       fallbackAfter: 3,                                // fix round at which a stuck Cursor agent hands
+                                                        // off to a native Claude subagent (see below)
        items: [ /* from step 3 */ ]
      }
    })
@@ -86,6 +88,18 @@ file); this skill parses the YAML and drives it phase-by-phase.
    the shell doesn't source `~/.zshrc`). **Assume the Cursor agent is configured and logged in**
    (`CURSOR_API_KEY` or a stored login) — never prompt for or set keys/models during execution; Cursor
    picks the model. Setup is in the README.
+
+   **Native-Claude fallback for stuck items.** Re-running the same auto-routed Cursor model on a fix it
+   keeps getting wrong rarely converges, so once a fix round reaches `fallbackAfter` (default 3 — Cursor
+   gets the first rounds), that round's fix is handed to a Claude Code **native** subagent that edits and
+   commits **directly with its own tools** (no `agent` CLI call). It also steps in immediately whenever
+   Cursor is **unavailable** (connection/quota/auth), including for the initial impl, so a down agent
+   doesn't burn rounds. The fallback is **one shot, hand back**: it makes a single focused fix + commit,
+   then control returns to the loop, which re-runs the gate and the Cursor review next round. **Review
+   stays Cursor-only** (`-p --trust`) and is never escalated — Cursor's index gives better global issue
+   identification, and keeping review on Cursor preserves implementer ≠ reviewer independence even when
+   the native subagent authored the fix. The final branch gate engages the same fallback on its last
+   round (or on unavailability).
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
