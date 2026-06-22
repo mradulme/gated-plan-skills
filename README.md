@@ -13,6 +13,7 @@ favours the best **value-for-money** per task type, scoring each run to a centra
 | `gated-plan-brainstorm` | `/gated-plan-brainstorm <topic>` | Runs a simulated design meeting on a subjective, open-ended topic: a chair casts a roster of deliberately-clashing personas (**each voiced by a different pooled model** — distinct minds clash, not one model role-playing all) and drives them through opening positions → debate rounds → convergence → an objections pass, then writes a decision brief to `docs/brainstorms/<topic>.md`. |
 | `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. Takes a brainstorm brief or a raw task as input. |
 | `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a pooled write-capable model** (edits + commits) — reviewed by a separate read-only pass run by a **different** pooled model (implementer ≠ reviewer) that loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
+| `delegate` | `/delegate <task>` | Ad-hoc hand-off of one isolated piece of work to a pooled model CLI (or a native Claude subagent) when it improves cost/speed/quality — read-only for investigation/review/critique/debugging, write only for clearly-scoped implementation. Same pool and scoreboard as `gated-plan-execute`, but driven on demand instead of from a plan: gets the exact invocation from `pool.mjs`, runs it, and records the outcome to the central scoreboard. |
 
 They compose: **brainstorm → create → execute**. `brainstorm` is optional — start there when the
 direction is still subjective; skip straight to `create` when the work is already concrete. The
@@ -57,6 +58,7 @@ git clone https://github.com/mradulme/gated-plan-skills.git
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-brainstorm" ~/.claude/skills/gated-plan-brainstorm
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-create"     ~/.claude/skills/gated-plan-create
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-execute"    ~/.claude/skills/gated-plan-execute
+ln -s "$PWD/gated-plan-skills/skills/delegate"             ~/.claude/skills/delegate
 ```
 
 Skills load at session start — start a fresh Claude Code session after installing.
