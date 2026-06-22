@@ -82,8 +82,13 @@ const REGISTRY = [
     write: true,
     read: true,
     or: ['moonshotai/kimi-k2.7', 'kimi-k2.7', 'moonshotai/kimi-k2', 'kimi-k2'],
-    writeCmd: (f, o) => `/Users/mradul/.kimi-code/bin/kimi -p "$(cat ${f})" -y${TAIL(o)}`,
-    readCmd: (f, o) => `/Users/mradul/.kimi-code/bin/kimi -p "$(cat ${f})" --plan${TAIL(o)}`,
+    // Claude Code aliased to Kimi's Anthropic-compatible coding endpoint via an isolated config dir
+    // (~/.claude-kimi/settings.json: base_url + auth token + alwaysThinkingEnabled so K2.7 is reached,
+    // not K2.6). Same shape as glm/minimax — write skips permissions, review runs read-only plan mode.
+    writeCmd: (f, o) =>
+      `CLAUDE_CONFIG_DIR=${HOME}/.claude-kimi ${CLAUDE} -p --dangerously-skip-permissions "$(cat ${f})"${TAIL(o)}`,
+    readCmd: (f, o) =>
+      `CLAUDE_CONFIG_DIR=${HOME}/.claude-kimi ${CLAUDE} -p --permission-mode plan "$(cat ${f})"${TAIL(o)}`,
   },
   {
     id: 'codex',
