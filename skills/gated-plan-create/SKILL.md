@@ -56,9 +56,9 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
    through the shared pool (`skills/_shared/pool.mjs`), which picks a model by fair-warmup-then-value
    and gives you a ready-to-run command. Write your question to a temp file, then (absolute paths —
    the shell doesn't source `~/.zshrc`):
-   - `node /Users/mradul/git/gated-plan-skills/skills/_shared/pool.mjs route --role advisory --file /tmp/gpc-q.txt --out /tmp/gpc-sounding.txt` → prints `{candidates:[{id,command},...]}`.
-   - Run `candidates[0].command`, read the `tail` of the out file (it is READ-ONLY — reasons over the
-     repo, edits nothing). On unavailability, try the next candidate.
+   - `node /Users/mradul/git/gated-plan-skills/skills/_shared/pool.mjs route --role advisory --file /tmp/gpc-q.txt --out /tmp/gpc-sounding.txt` → prints `{chosen:{id,command}, fallbackIds:[...]}`.
+   - Run `chosen.command`, read the `tail` of the out file (it is READ-ONLY — reasons over the
+     repo, edits nothing). Only on unavailability, re-route with `--exclude <id-tried>` and run the new `chosen.command`.
    - Record it: `node …/pool.mjs record --role advisory --model <id-that-ran> --available <true|false>`.
 
    This is a sanity check, not a vote. Ask only when it earns the round-trip; **you are the final

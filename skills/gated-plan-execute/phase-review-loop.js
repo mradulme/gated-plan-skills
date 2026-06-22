@@ -67,8 +67,10 @@ const GATE = {
 
 // Backend: a POOL of model CLIs, routed by skills/_shared/pool.mjs (the on-disk source of truth — the
 // Workflow sandbox has no fs/require, so the agent() subagents below shell out to it). For each task it
-// prints an ordered candidate list {id, command}: the subagent runs the first, falls through to the
-// next on unavailability, then records the outcome. impl/fix get WRITE-capable commands (edit + commit),
+// hands back ONE runnable command (the top pick) plus the ranked fallback ids; the subagent runs that
+// single command, and only on unavailability re-routes with --exclude to get the next single command,
+// then records the outcome. One write command is ever live, so a task can't fan out to several models
+// at once. impl/fix get WRITE-capable commands (edit + commit),
 // review gets READ-ONLY commands (investigate via git/reads, no edits). claude is NOT in the pool — it is
 // the native last resort (nativeFix) so it can never skew the value rankings. Absolute path: the shell
 // doesn't source ~/.zshrc, and pool.mjs emits absolute/ config-dir invocations for the same reason.
@@ -86,8 +88,9 @@ const DELEGATE = {
 }
 
 // Delegate ONE implementation/fix task to a POOLED write-capable model CLI. The subagent writes the task
-// to a temp file (safe quoting), asks pool.mjs to route, runs the chosen command (falling through to the
-// next candidate if one is unavailable), records the outcome, and reports back. A run that completes —
+// to a temp file (safe quoting), asks pool.mjs to route, runs the ONE chosen command and waits (only
+// re-routing with --exclude to a different model if that one was unavailable — never two at once),
+// records the outcome, and reports back. A run that completes —
 // commit or not — is that model's turn; the gate/fix loop handles a no-commit run. `role` is implement
 // or fix (both 'code' bucket); `exclude` keeps a model out of contention if the caller wants to.
 const delegate = (task, label, role = 'implement', exclude = []) => {
@@ -97,19 +100,23 @@ const delegate = (task, label, role = 'implement', exclude = []) => {
   const ex = exclude.length ? ` --exclude ${exclude.join(',')}` : ''
   return agent(
     `You are delegating ONE ${role} task on git branch \`${branch}\` to a pooled model CLI — do NOT code it ` +
-      `yourself. Work these steps, each with Bash timeout 600000 ms (absolute paths — the shell does not source ~/.zshrc):\n` +
+      `yourself. EXACTLY ONE write-capable model may run for this task: run it, WAIT for it, and only try ` +
+      `another model if the first never ran (UNAVAILABLE). NEVER run two model commands for this task, and ` +
+      `NEVER start another while one is still running or has already succeeded — that would corrupt the branch.\n` +
+      `Work these steps, each with Bash timeout 600000 ms (absolute paths — the shell does not source ~/.zshrc):\n` +
       `1. Write the task (given at the END, after the marker) VERBATIM to ${taskfile} with the Write tool ` +
       `(preserve backticks/$/quotes/newlines).\n` +
       `2. Route: \`node ${POOL} route --role ${role} --file ${taskfile} --out ${out}${ex}\`. It prints ` +
-      `{candidates:[{id,command},...]} ordered best-first.\n` +
-      `3. Run candidates[0].command EXACTLY as printed. It is WRITE-CAPABLE (edits files + makes the git commit). ` +
-      `Read ONLY the tail of ${out}. If it reports UNAVAILABLE (connection lost / exceeded max retries / out of ` +
-      `quota / auth error / empty output), run the NEXT candidate's command instead, and so on. If EVERY candidate ` +
-      `is unavailable, the model is "none".\n` +
-      `4. Record: \`node ${POOL} record --role ${role} --model <id-that-ran> --available <true|false> ` +
-      `--committed <true|false>\` (available=false only if all candidates were unavailable; committed=true iff a ` +
+      `{chosen:{id,command}, fallbackIds:[...]} — chosen is the ONE model to run (null if none eligible).\n` +
+      `3. Run chosen.command EXACTLY as printed and WAIT for it to finish — nothing else. It is WRITE-CAPABLE ` +
+      `(edits files + makes the git commit). Read ONLY the tail of ${out}.\n` +
+      `4. ONLY if it reports UNAVAILABLE (connection lost / exceeded max retries / out of quota / auth error / ` +
+      `empty output — i.e. it never actually ran) do you try the next model: re-route excluding every id tried ` +
+      `so far — \`node ${POOL} route --role ${role} --file ${taskfile} --out ${out} --exclude <tried-ids,comma-sep>\`${ex ? ` (keep the pre-excluded ${exclude.join(',')} too)` : ''} — then run the new chosen.command (step 3). Repeat until one runs or chosen is null. If chosen is null, the model is "none".\n` +
+      `5. Record: \`node ${POOL} record --role ${role} --model <id-that-ran> --available <true|false> ` +
+      `--committed <true|false>\` (available=false only if every candidate was unavailable; committed=true iff a ` +
       `NEW commit is at HEAD — verify git log --oneline -1 / that HEAD advanced).\n` +
-      `5. Return { committed, model:<id-that-ran, or "none" if all unavailable>, detail:<short summary + commit ` +
+      `6. Return { committed, model:<id-that-ran, or "none" if all unavailable>, detail:<short summary + commit ` +
       `subject, or the failure reason> }.` +
       `\n\n--- TASK (write this verbatim to ${taskfile}) ---\n${task}`,
     { label, phase: phaseTitle, schema: DELEGATE }
@@ -196,17 +203,20 @@ const reviewAgent = (target, label, exclude = []) => {
     `do not just skim. List P1 (must-fix: bug, regression, security, data loss) and P2 (correctness risk, ` +
     `missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
-    `On branch \`${branch}\`, review ${scopeMd} using a pooled READ-ONLY model. Steps, each Bash timeout ` +
-      `600000 ms (absolute paths — the shell does not source ~/.zshrc):\n` +
+    `On branch \`${branch}\`, review ${scopeMd} using a pooled READ-ONLY model — run EXACTLY ONE reviewer; ` +
+      `only try another if the first never ran (UNAVAILABLE). Steps, each Bash timeout 600000 ms (absolute ` +
+      `paths — the shell does not source ~/.zshrc):\n` +
       `1. Write the review instruction (given at the END, after the marker) VERBATIM to ${pf} with the Write tool.\n` +
       `2. Route a reviewer DIFFERENT from the implementer: \`node ${POOL} route --role review --file ${pf} ` +
-      `--out ${out}${ex}\`. It prints {candidates:[{id,command},...]} ordered best-first.\n` +
-      `3. Run candidates[0].command EXACTLY as printed; WAIT for it to finish. It is READ-ONLY (investigates ` +
-      `via git/reads, applies no edits). Read ONLY the tail of ${out}. If it reports UNAVAILABLE (connection ` +
-      `lost / exceeded max retries / out of quota / auth / empty output), run the NEXT candidate instead.\n` +
-      `4. Record: \`node ${POOL} record --role review --model <id-that-ran> --available <true|false> ` +
+      `--out ${out}${ex}\`. It prints {chosen:{id,command}, fallbackIds:[...]} — chosen is the ONE reviewer to run.\n` +
+      `3. Run chosen.command EXACTLY as printed; WAIT for it to finish — nothing else. It is READ-ONLY ` +
+      `(investigates via git/reads, applies no edits). Read ONLY the tail of ${out}.\n` +
+      `4. ONLY if it reports UNAVAILABLE (connection lost / exceeded max retries / out of quota / auth / empty ` +
+      `output) do you try the next: re-route excluding every id tried so far — \`node ${POOL} route --role ` +
+      `review --file ${pf} --out ${out} --exclude <tried-ids,comma-sep>\`${ex ? ` (keep the pre-excluded ${exclude.join(',')} too)` : ''} — then run the new chosen.command. Repeat until one runs or chosen is null.\n` +
+      `5. Record: \`node ${POOL} record --role review --model <id-that-ran> --available <true|false> ` +
       `--p1 <count> --p2 <count>\`.\n` +
-      `5. Classify P1 (must-fix: real bug, regression, security, data loss, broken gate) and P2 (should-fix: ` +
+      `6. Classify P1 (must-fix: real bug, regression, security, data loss, broken gate) and P2 (should-fix: ` +
       `correctness risk, missing edge case). Ignore P3/nits/style. If EVERY candidate was unavailable and no ` +
       `review was produced, do NOT return empty p1/p2 (an empty result reads as a clean pass) — record ` +
       `--available false and return a single P1 "NO REVIEWER AVAILABLE: code is UNREVIEWED, do not merge". ` +

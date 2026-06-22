@@ -83,8 +83,11 @@ it phase-by-phase.
 
    **Implementation & fix delegation.** The workflow does NOT implement items itself — each impl/fix is
    routed by `pool.mjs` to a **write-capable** pooled model (it edits files and makes the commit itself).
-   The subagent runs the router, runs the chosen command, **falls through to the next candidate** if one
-   is unavailable, then records the outcome. The task text is passed via a temp file so backticks/`$`/quotes
+   `route` hands back **exactly one runnable command** (the top pick) plus the ranked fallback *ids* — so
+   the subagent can only ever hold a single write command at a time and **cannot fan the same item out to
+   several models**. The subagent runs that one command, waits for it, and **only if it was unavailable**
+   re-routes with `--exclude` to get the next single command; then it records the outcome. The task text
+   is passed via a temp file so backticks/`$`/quotes
    survive intact. An impl run that **ran but left no commit** is that model's turn — the gate/fix loop
    handles it, not a re-run; only if **every** candidate is unavailable is the item left for the native
    fallback. pool.mjs emits absolute / config-dir invocations (the shell doesn't source `~/.zshrc`).
@@ -119,7 +122,9 @@ it phase-by-phase.
   Keep each delegated impl/fix scoped to a single item.
 - Impl/fix are **delegated to a pooled model CLI** (write mode), not the orchestrator itself; the
   orchestrator only classifies reviews and drives the loop.
-- Sequential only (no parallel item agents) — they share the working tree.
+- Sequential only (no parallel item agents) — they share the working tree. Within an item, exactly one
+  write-capable model command is ever live (`route` returns a single runnable command); a second model
+  is tried only after the first reports unavailable, never concurrently.
 - The review subagent **runs ONE read-only reviewer (a pooled model ≠ the last author) and classifies**;
   it never edits. Fixes are a separate subagent.
 - Verify, don't assume: if a gate (`lint`/`typecheck`/`test`) isn't green, the item isn't done.

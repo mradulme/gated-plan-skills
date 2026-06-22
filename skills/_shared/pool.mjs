@@ -6,9 +6,11 @@
 //
 //   node pool.mjs route  --role <implement|fix|review|brainstorm|advisory> --file <prompt/task file>
 //                        --out <output file> [--exclude id,id]
-//       → prints { candidates: [ { id, command }, ... ] } ordered best→worst (fair-warmup then
-//         epsilon-greedy by value). The caller runs candidates[0]; on "unavailable" it falls through
-//         to the next, then records the one that actually ran.
+//       → prints { chosen: { id, command } | null, fallbackIds: [...] }: ONE runnable command (the top
+//         pick, fair-warmup then epsilon-greedy by value) plus the ranked fallback ids (no commands).
+//         The caller runs `chosen`; only on "unavailable" does it re-route with --exclude to get the
+//         next single command — so it never holds more than one runnable command at a time. Then it
+//         records the one that actually ran.
 //
 //   node pool.mjs record --role <r> --model <id> --available <true|false>
 //                        [--committed true|false] [--gate-first-try true|false]
@@ -252,15 +254,20 @@ const orderedEligible = (role, excludeSet) => {
 const excludeOf = (args) => new Set(String(args.exclude || '').split(',').map((s) => s.trim()).filter(Boolean))
 const buildCmd = (m, role, file, out) => (needsWrite(role) ? m.writeCmd(file, out) : m.readCmd(file, out))
 
-// route: ordered candidate list with ready-to-run commands (caller runs [0], falls through on failure).
+// route: ONE runnable command (the top pick) + the ranked fallback ids (NO commands). The caller can
+// only ever hold a single runnable command, so it cannot fan the same task out to several models; to
+// try the next model it MUST re-route with --exclude <chosen.id>. chosen is null iff every eligible
+// model is excluded/unavailable.
 const route = (args) => {
   const role = args.role || 'implement'
   if (!args.file || !args.out) throw new Error('route requires --file and --out')
-  const candidates = orderedEligible(role, excludeOf(args)).map((m) => ({
-    id: m.id,
-    command: buildCmd(m, role, args.file, args.out),
-  }))
-  process.stdout.write(JSON.stringify({ role, bucket: bucketOf(role), candidates }))
+  const ordered = orderedEligible(role, excludeOf(args))
+  const chosen = ordered.length
+    ? { id: ordered[0].id, command: buildCmd(ordered[0], role, args.file, args.out) }
+    : null
+  process.stdout.write(
+    JSON.stringify({ role, bucket: bucketOf(role), chosen, fallbackIds: ordered.slice(1).map((m) => m.id) })
+  )
 }
 
 // list: just the ordered ids (used to spread distinct models across brainstorm personas).
@@ -414,7 +421,7 @@ const main = async () => {
     default:
       process.stdout.write(
         'usage: pool.mjs <route|list|cmd|record|stats|pricing> [flags]\n' +
-          '  route  --role <r> --file <f> --out <o> [--exclude a,b]   ordered candidates w/ commands\n' +
+          '  route  --role <r> --file <f> --out <o> [--exclude a,b]   one chosen command + fallback ids\n' +
           '  list   --role <r> [--exclude a,b]                        ordered model ids only\n' +
           '  cmd    --id <id> --role <r> --file <f> --out <o>         command for one pinned model\n' +
           '  record --role <r> --model <id> --available <bool> [--committed --rounds N --p1 N --p2 N --stuck]\n' +
