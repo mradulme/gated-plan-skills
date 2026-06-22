@@ -1,18 +1,20 @@
 ---
 name: gated-plan-execute
-description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by the Cursor agent CLI (headless `-p --force`: auto-routed model, Cursor codebase index, writes + commits) and each commit reviewed by a separate read-only pass (`agent -p --trust`) looped until no P1/P2. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
+description: Execute a commit-by-commit plan YAML phase-by-phase, each commit gated by a code-review loop plus a final branch-vs-main gate. Use when the user points at a plan YAML (e.g. docs/plans/*.yaml) and wants it built one item at a time, branched per phase from a base, each item implemented/fixed by a pooled model CLI chosen by skills/_shared/pool.mjs (glm/minimax/kimi/codex/cursor — fair-warmup then best value-for-money, write-capable) and each commit reviewed by a separate read-only pass run by a DIFFERENT pooled model, looped until no P1/P2; Claude is the native last resort. Triggers on "run/execute this plan", "work the checklist with review", "/gated-plan-execute <doc>". Pairs with `gated-plan-create`, which produces the YAML this skill consumes.
 ---
 
 # gated-plan-execute
 
 Drive a commit-level plan YAML to done: per phase, branch from a base, do each item **sequentially**
 (one commit each), gate every commit on a review loop until no P1/P2, then gate the **whole branch
-against `main`** before merge. Each item's implementation/fix is **delegated to the Cursor `agent`
-CLI** (headless, write-capable: `-p --force` — Cursor auto-routes a model, uses its codebase index,
-edits files, and makes the commit) — the workflow never re-spawns itself to write code. Review is a
-**separate read-only pass** by the same agent (`-p --trust`, no `--force` — it investigates but cannot
-edit). The deterministic loop lives in the bundled workflow `phase-review-loop.js` (next to this
-file); this skill parses the YAML and drives it phase-by-phase.
+against `main`** before merge. Each item's implementation/fix is **delegated to a pooled model CLI**
+chosen by the shared router (`skills/_shared/pool.mjs` — glm/minimax/kimi/codex/cursor, fair-warmup
+then best value-for-money, write-capable: edits files + commits) — the workflow never re-spawns itself
+to write code. Review is a **separate read-only pass run by a *different* pooled model** (implementer ≠
+reviewer). Every run is scored to `~/.gated-plan/events.jsonl`. When the pool stalls or is unavailable,
+a **native Claude** subagent (last resort) takes one direct fix shot. The deterministic loop lives in
+the bundled workflow `phase-review-loop.js` (next to this file); this skill parses the YAML and drives
+it phase-by-phase.
 
 ## Inputs
 - **Required:** path to the plan YAML (the skill argument). If none given, ask for it.
@@ -50,7 +52,7 @@ file); this skill parses the YAML and drives it phase-by-phase.
        base: '<yaml base, default release>',
        reviewBase: '<yaml reviewBase, default main>',   // the final branch gate reviews against this
        maxRounds: 7,
-       fallbackAfter: 3,                                // fix round at which a stuck Cursor agent hands
+       fallbackAfter: 3,                                // fix round at which a stuck pool hands
                                                         // off to a native Claude subagent (see below)
        items: [ /* from step 3 */ ]
      }
@@ -71,35 +73,34 @@ file); this skill parses the YAML and drives it phase-by-phase.
    **final branch-vs-`reviewBase` review** runs to catch cross-commit interactions, loop-fixing up to 3
    rounds; anything still flagged returns in `branchUnresolved`.
 
-   **Review = a separate read-only pass.** Each review is **one** reviewer: the Cursor agent run
-   read-only (`-p --trust`, no `--force` — it investigates via git/reads but cannot apply edits). It is
-   not the invocation that wrote the code, and it auto-routes its own model and uses Cursor's codebase
-   index, so the workflow does NOT pre-dump a diff — let it explore (a real review, not a skim). **No
-   `--json`** (output defaults to final-answer-only text); the command redirects to a temp file and the
-   subagent reads the `tail`. If the agent can't run (connection lost / max retries / quota / auth), the
-   subagent returns a P1 "NO REVIEWER AVAILABLE" rather than a silent clean pass.
+   **Review = a separate read-only pass.** Each review is **one** reviewer: a pooled model run
+   read-only (it investigates via git/reads but applies no edits), routed by `pool.mjs` and **excluded
+   from being whoever last authored the code**, so implementer ≠ reviewer holds even after fixes. It is
+   not the invocation that wrote the code, so the workflow does NOT pre-dump a diff — let it explore (a
+   real review, not a skim). Output is read from the `tail` of a temp file. The reviewer's findings (P1/P2
+   counts) are recorded to the scoreboard. If the whole pool can't run (connection lost / max retries /
+   quota / auth), the subagent returns a P1 "NO REVIEWER AVAILABLE" rather than a silent clean pass.
 
    **Implementation & fix delegation.** The workflow does NOT implement items itself — each impl/fix is
-   handed to the Cursor agent in **write mode** (`-p --force`: Cursor auto-routes a model, edits files,
-   and makes the commit itself). The task text is passed via a temp file so backticks/`$`/quotes survive
-   intact. An impl run that **ran but left no commit** is the agent's turn — the gate/fix loop handles
-   it, not a re-run; only if the agent is **unavailable** (connection/quota/auth) is the item left for
-   retry (gate goes red). The binary is invoked by **absolute path** (`/Users/mradul/.local/bin/agent`;
-   the shell doesn't source `~/.zshrc`). **Assume the Cursor agent is configured and logged in**
-   (`CURSOR_API_KEY` or a stored login) — never prompt for or set keys/models during execution; Cursor
-   picks the model. Setup is in the README.
+   routed by `pool.mjs` to a **write-capable** pooled model (it edits files and makes the commit itself).
+   The subagent runs the router, runs the chosen command, **falls through to the next candidate** if one
+   is unavailable, then records the outcome. The task text is passed via a temp file so backticks/`$`/quotes
+   survive intact. An impl run that **ran but left no commit** is that model's turn — the gate/fix loop
+   handles it, not a re-run; only if **every** candidate is unavailable is the item left for the native
+   fallback. pool.mjs emits absolute / config-dir invocations (the shell doesn't source `~/.zshrc`).
+   **Assume the pooled CLIs are configured and logged in** — never prompt for or set keys/models during
+   execution. Setup is in the README.
 
-   **Native-Claude fallback for stuck items.** Re-running the same auto-routed Cursor model on a fix it
-   keeps getting wrong rarely converges, so once a fix round reaches `fallbackAfter` (default 3 — Cursor
-   gets the first rounds), that round's fix is handed to a Claude Code **native** subagent that edits and
-   commits **directly with its own tools** (no `agent` CLI call). It also steps in immediately whenever
-   Cursor is **unavailable** (connection/quota/auth), including for the initial impl, so a down agent
+   **Native-Claude fallback for stuck items (last resort).** Re-running the same model on a fix it keeps
+   getting wrong rarely converges, so once a fix round reaches `fallbackAfter` (default 3 — the pool gets
+   the first rounds), that round's fix is handed to a Claude Code **native** subagent that edits and
+   commits **directly with its own tools** (no pool/CLI call). It also steps in immediately whenever the
+   **whole pool is unavailable** (connection/quota/auth), including for the initial impl, so a down pool
    doesn't burn rounds. The fallback is **one shot, hand back**: it makes a single focused fix + commit,
-   then control returns to the loop, which re-runs the gate and the Cursor review next round. **Review
-   stays Cursor-only** (`-p --trust`) and is never escalated — Cursor's index gives better global issue
-   identification, and keeping review on Cursor preserves implementer ≠ reviewer independence even when
-   the native subagent authored the fix. The final branch gate engages the same fallback on its last
-   round (or on unavailability).
+   then control returns to the loop, which re-runs the gate and a pooled review next round. The reviewer
+   is always routed to a model **different from the last author** (including when that author was the
+   native subagent), so implementer ≠ reviewer independence holds throughout. The final branch gate
+   engages the same fallback on its last round (or on whole-pool unavailability).
 
 5. **After the phase completes:**
    - Set `done: true` on the now-finished items in the YAML and commit that doc update.
@@ -116,10 +117,10 @@ file); this skill parses the YAML and drives it phase-by-phase.
 ## Guardrails
 - One item = one commit = one review gate; the branch then gets one final review vs `reviewBase`.
   Keep each delegated impl/fix scoped to a single item.
-- Impl/fix are **delegated to the Cursor agent CLI** (write mode), not the orchestrator itself; the
+- Impl/fix are **delegated to a pooled model CLI** (write mode), not the orchestrator itself; the
   orchestrator only classifies reviews and drives the loop.
 - Sequential only (no parallel item agents) — they share the working tree.
-- The review subagent **runs ONE read-only reviewer (the Cursor agent, `-p --trust`) and classifies**;
+- The review subagent **runs ONE read-only reviewer (a pooled model ≠ the last author) and classifies**;
   it never edits. Fixes are a separate subagent.
 - Verify, don't assume: if a gate (`lint`/`typecheck`/`test`) isn't green, the item isn't done.
 - Surface blockers and merge/push decisions to the human; make only the small calls yourself.

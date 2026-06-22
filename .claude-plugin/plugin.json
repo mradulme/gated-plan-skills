@@ -1,11 +1,11 @@
 {
   "name": "gated-plan-skills",
-  "version": "0.4.0",
-  "description": "Brainstorm a subjective topic into decisions with a meeting of models, plan the work as a checklist of small commits, then execute it phase-by-phase with each commit gated by an AI code-review loop until no P1/P2.",
+  "version": "0.5.0",
+  "description": "Brainstorm a subjective topic into decisions with a meeting of models, plan the work as a checklist of small commits, then execute it phase-by-phase with each commit gated by an AI code-review loop until no P1/P2. Work is routed across a pool of model CLIs (glm/minimax/kimi/codex/cursor) by best value-for-money, scored to a central scoreboard, with Claude as native last resort.",
   "author": { "name": "mradulme", "url": "https://github.com/mradulme" },
   "homepage": "https://github.com/mradulme/gated-plan-skills",
   "repository": "https://github.com/mradulme/gated-plan-skills",
   "license": "MIT",
-  "keywords": ["planning", "brainstorm", "code-review", "cline", "workflow", "skills", "claude-code"],
+  "keywords": ["planning", "brainstorm", "code-review", "multi-model", "routing", "scoreboard", "workflow", "skills", "claude-code"],
   "skills": "./skills/"
 }

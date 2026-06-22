@@ -52,17 +52,19 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
 
    **Optional sounding board (advisory only).** When a phasing or splitting call in steps 3–4 is
    genuinely hard — an ambiguous root-cause clustering, an unclear dependency order, "is this one
-   commit or three?" — you MAY consult the Cursor agent for a second opinion. Run it **read-only**
-   (`-p --trust`, no `--force` — it investigates the repo and reasons but cannot edit; it auto-routes
-   a model and uses Cursor's codebase index), absolute path (the shell doesn't source `~/.zshrc`),
-   redirect to a temp file and read the `tail` (output is the final answer only — no `--json`):
-   - `/Users/mradul/.local/bin/agent -p --trust "<question>" > /tmp/gpc-sounding.txt 2>&1; tail -n 120 /tmp/gpc-sounding.txt`
+   commit or three?" — you MAY consult a pooled model for a second opinion. Route it **read-only**
+   through the shared pool (`skills/_shared/pool.mjs`), which picks a model by fair-warmup-then-value
+   and gives you a ready-to-run command. Write your question to a temp file, then (absolute paths —
+   the shell doesn't source `~/.zshrc`):
+   - `node /Users/mradul/git/gated-plan-skills/skills/_shared/pool.mjs route --role advisory --file /tmp/gpc-q.txt --out /tmp/gpc-sounding.txt` → prints `{candidates:[{id,command},...]}`.
+   - Run `candidates[0].command`, read the `tail` of the out file (it is READ-ONLY — reasons over the
+     repo, edits nothing). On unavailability, try the next candidate.
+   - Record it: `node …/pool.mjs record --role advisory --model <id-that-ran> --available <true|false>`.
 
    This is a sanity check, not a vote. Ask only when it earns the round-trip; **you are the final
    decider** — weigh what it says, take what's useful, discard the rest. Don't consult on easy calls,
-   don't defer to it, don't paste its output into the plan verbatim. If the agent is unavailable
-   (connection/quota/auth), just skip it and decide yourself. Assume the Cursor agent is preconfigured
-   — never set keys/models.
+   don't defer to it, don't paste its output into the plan verbatim. If every candidate is unavailable
+   (connection/quota/auth), just skip it and decide yourself. The pool is preconfigured — never set keys/models.
 
 5. **Write the YAML** in the schema below to `docs/plans/<kebab-name>.yaml`. Then tell the user to
    run `gated-plan-execute docs/plans/<file>.yaml`. Don't start implementing — this skill only plans.

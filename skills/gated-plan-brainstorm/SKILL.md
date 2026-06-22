@@ -1,14 +1,14 @@
 ---
 name: gated-plan-brainstorm
-description: Run a multi-persona "meeting" that deliberates a subjective, open-ended topic into concrete decisions and directions, then writes a markdown brief that `gated-plan-create` can turn into a plan. Use when the work isn't a known checklist yet — the question is what to even build/do ("should we adopt X?", "how should this subsystem be shaped?", "which direction here?"). A chair (this skill) casts a roster of deliberately-clashing personas dynamically for the topic, each voiced by the Cursor agent CLI (headless `-p --trust`, read-only — auto-routed model that can read the repo to ground its view), and drives them through opening positions → debate rounds → convergence → a final objections pass. Triggers on "brainstorm directions", "run a brainstorm meeting", "let's decide the approach first", "/gated-plan-brainstorm <topic>". Pairs with `gated-plan-create`, which consumes the brief this skill writes.
+description: Run a multi-persona "meeting" that deliberates a subjective, open-ended topic into concrete decisions and directions, then writes a markdown brief that `gated-plan-create` can turn into a plan. Use when the work isn't a known checklist yet — the question is what to even build/do ("should we adopt X?", "how should this subsystem be shaped?", "which direction here?"). A chair (this skill) casts a roster of deliberately-clashing personas dynamically for the topic, each voiced by a DIFFERENT pooled model CLI chosen by skills/_shared/pool.mjs (glm/minimax/kimi/codex/cursor — read-only, can read the repo to ground its view), so distinct model minds clash, and drives them through opening positions → debate rounds → convergence → a final objections pass. Triggers on "brainstorm directions", "run a brainstorm meeting", "let's decide the approach first", "/gated-plan-brainstorm <topic>". Pairs with `gated-plan-create`, which consumes the brief this skill writes.
 ---
 
 # gated-plan-brainstorm
 
 The front of the trio: **brainstorm → create → execute**. `create` splits *known* work into commits;
 `execute` builds it. This skill decides **what the work even is** when the topic is subjective and
-open-ended — by running a simulated design meeting: a roster of clashing personas, each voiced by the
-Cursor agent, argued to a decision.
+open-ended — by running a simulated design meeting: a roster of clashing personas, each voiced by a
+different pooled model, argued to a decision.
 
 You are the **chair**. A roster of personas — cast dynamically to fit the topic, with deliberately
 clashing stances, like inviting different experts to a meeting — debate the question. Personas can't
@@ -18,10 +18,11 @@ facilitator-mediated, exactly like a real meeting. The deterministic choreograph
 workflow `brainstorm-meeting.js` (next to this file); this skill frames the topic, launches it, and
 presents the brief.
 
-Every persona is voiced by the **Cursor `agent` CLI** (auto-routed model, Cursor codebase index); the
-chair (this session) sits above them. Diversity comes from the persona **briefs**, not from mixing
-models. Personas run **read-only** (`-p --trust`, no `--force`) so they can ground themselves in the
-repo but edit nothing.
+Each persona is voiced by a **different pooled model** — the chair assigns a distinct model per seat
+(round-robin over `pool.mjs`'s ordered, warmup/value-aware id list), so diversity comes from **both**
+the persona briefs **and** genuinely different model minds. The chair (this session) sits above them.
+Personas run **read-only** so they can ground themselves in the repo but edit nothing; each turn is
+scored to the shared scoreboard. Claude is not pooled.
 
 ## Inputs
 - **Required:** the topic / question to brainstorm (the skill argument). If none given, ask for it.
@@ -58,12 +59,12 @@ repo but edit nothing.
    → **Converge** (chair drafts the decision brief) → **Objections** (personas critique the draft in
    parallel; chair folds in legitimate objections and writes the final markdown).
 
-   Each persona turn is delegated to the Cursor agent (read-only, auto-routed). Output defaults to
-   final-answer-only text (no `--json`); the command redirects to a temp file and the subagent reads
-   the `tail`. The binary is invoked by **absolute path** (`/Users/mradul/.local/bin/agent`; the shell
-   doesn't source `~/.zshrc`); assume the Cursor agent is configured and logged in — never set
-   keys/models here. If the agent can't run a turn (connection/quota/auth), that persona stays silent
-   for the round rather than blocking the meeting.
+   Each persona turn is delegated to that persona's **assigned pooled model**, run read-only via
+   `pool.mjs cmd --id <model> --role brainstorm`. The command redirects to a temp file and the subagent
+   reads the `tail`; pool.mjs emits absolute / config-dir invocations (the shell doesn't source
+   `~/.zshrc`); assume the pooled CLIs are configured and logged in — never set keys/models here. If a
+   persona's model can't run a turn (connection/quota/auth), that persona stays silent for the round
+   (recorded as unavailable) rather than blocking the meeting.
 
 3. **Present the result.** Show the user the returned `summary`, the `centralQuestion`, the roster,
    and the brief path. Read the brief and surface the key decisions, the live dissent, and the open
@@ -76,9 +77,9 @@ repo but edit nothing.
 ## Guardrails
 - Fully autonomous between launch and brief — workflows can't pause mid-run for input. The human
   checkpoints are at the edges: framing the topic going in, reviewing the brief coming out.
-- The chair never writes the personas' arguments — each turn is a **delegated read-only Cursor agent**;
-  the chair only casts the roster, synthesizes, and drafts/finalizes the brief.
-- Personas are **read-only** (`-p --trust`, no `--force`) — a brainstorm edits nothing.
+- The chair never writes the personas' arguments — each turn is a **delegated read-only pooled model**;
+  the chair only casts the roster, assigns models, synthesizes, and drafts/finalizes the brief.
+- Personas are **read-only** — a brainstorm edits nothing.
 - Output is a **markdown brief**, not a plan YAML — `gated-plan-create` still owns the splitting.
 - Surface dissent honestly. A brief that hides the clashes is worse than no brief — `create` needs the
   real trade-offs to plan well.

@@ -1,7 +1,7 @@
 export const meta = {
   name: 'brainstorm-meeting',
   description:
-    'Run a simulated design meeting on a subjective topic: a chair (this workflow) casts a roster of clashing personas, each voiced by the Cursor agent CLI (headless -p --trust, read-only — auto-routed model that may read the repo to ground its view), then drives them through opening positions → facilitator-mediated debate rounds → convergence → a final objections pass, and writes a decision brief that gated-plan-create can consume',
+    'Run a simulated design meeting on a subjective topic: a chair (this workflow) casts a roster of clashing personas, each voiced by a DIFFERENT pooled model CLI chosen by skills/_shared/pool.mjs (glm/minimax/kimi/codex/cursor, read-only — distinct model minds clash instead of one model role-playing all), then drives them through opening positions → facilitator-mediated debate rounds → convergence → a final objections pass, and writes a decision brief that gated-plan-create can consume. Each turn is scored to ~/.gated-plan/events.jsonl',
   whenToUse:
     'Invoked by the gated-plan-brainstorm skill to deliberate an open-ended question into concrete decisions/directions before planning',
   phases: [
@@ -23,16 +23,14 @@ const slug =
   String(topic).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'brainstorm'
 const briefPath = `${outDir}/${slug}.md`
 
-// ---- Backend: Cursor's `agent` CLI, headless, read-only (-p --trust, no --force) — every persona turn
-// is voiced by it. No -m/--model: Cursor auto-routes a model and may use its codebase index to ground a
-// persona's view. Copied (not shared) into each skill by repo convention — a shared lib would be the
-// over-engineering they already avoid. The persona prompt (topic + transcript) carries arbitrary text,
-// so it is written to a temp file and passed via "$(cat ...)" — the shell does not re-interpret
-// backticks/$/quotes/newlines. --output-format defaults to text (final answer only) so no --json bloat;
-// redirect to a temp file and tail it. Absolute path: the shell doesn't source ~/.zshrc. --trust is
-// required even read-only — headless aborts on an untrusted workspace; with no --force, edits never apply.
-const AGENT = '/Users/mradul/.local/bin/agent'
-const readCmd = (pf, out) => `${AGENT} -p --trust "$(cat ${pf})" > ${out} 2>&1; tail -n 120 ${out}`
+// ---- Backend: a POOL of read-only model CLIs, routed by skills/_shared/pool.mjs (the on-disk source of
+// truth — the Workflow sandbox has no fs/require, so the agent() subagents shell out to it). The chair
+// assigns a DISTINCT model to each persona (round-robin over pool.mjs's ordered, warmup/value-aware id
+// list) so the debate is genuinely different minds clashing, not one model role-playing every seat. Each
+// persona turn runs `pool.mjs cmd --id <model> --role brainstorm` to get its read-only command (may read
+// repo files to ground itself, edits nothing), feeds the prompt via a temp file + "$(cat ...)" so
+// backticks/$/quotes/newlines survive, tails the output, and records the turn. claude is NOT pooled.
+const POOL = '/Users/mradul/git/gated-plan-skills/skills/_shared/pool.mjs'
 
 const SPEAK = {
   type: 'object',
@@ -96,9 +94,10 @@ const renderSynth = (s) => {
   )
 }
 
-// Relay ONE persona turn to the read-only Cursor agent. Like gated-plan-execute's reviewer, but the
-// prompt is file-fed (arbitrary transcript text) and the model speaks IN CHARACTER instead of reviewing.
-const speak = (persona, body, label, phaseLabel) => {
+// Relay ONE persona turn to that persona's ASSIGNED pooled read-only model. The prompt is file-fed
+// (arbitrary transcript text) and the model speaks IN CHARACTER. The turn is recorded so brainstorm
+// participation/availability per model feeds the same scoreboard as impl/review.
+const speak = (persona, body, label, phaseLabel, model) => {
   const lslug = label.replace(/[^a-z0-9]+/gi, '-')
   const pf = `/tmp/gpb-prompt-${lslug}.txt`
   const out = `/tmp/gpb-out-${lslug}.txt`
@@ -108,17 +107,19 @@ const speak = (persona, body, label, phaseLabel) => {
     `Keep it to a few focused paragraphs. Be concrete and cite specifics (you may read the repo to ground your view) ` +
     `over generalities.`
   return agent(
-    `You are relaying ONE turn of a brainstorm meeting to the read-only Cursor agent CLI — do NOT answer yourself. First ` +
-      `write the meeting prompt (given at the END, after the marker) VERBATIM to ${pf} using the Write tool, so ` +
-      `backticks/$/quotes/newlines are preserved exactly. Then run this command EXACTLY as written (absolute path — the ` +
-      `shell does not source ~/.zshrc), with Bash timeout 600000 ms. It is READ-ONLY (-p --trust, no --force: Cursor ` +
-      `auto-routes a model that may read repo files to ground itself but edits nothing). Output is the final answer only ` +
-      `— read ONLY the tail; do NOT pass --json.\n\n` +
-      `  ${readCmd(pf, out)}\n\n` +
-      `Then decide:\n` +
-      `• It produced the persona's contribution → return { text:<the model's full response, verbatim>, model:"cursor-agent" }.\n` +
-      `• It could NOT run — connection lost / "exceeded max retries" / out of quota / auth error → ` +
-      `return { text:"(no model available to speak this turn)", model:"none" }.` +
+    `You are relaying ONE turn of a brainstorm meeting to a pooled READ-ONLY model CLI — do NOT answer yourself. ` +
+      `Steps (Bash timeout 600000 ms, absolute paths — the shell does not source ~/.zshrc):\n` +
+      `1. Write the meeting prompt (given at the END, after the marker) VERBATIM to ${pf} with the Write tool ` +
+      `(preserve backticks/$/quotes/newlines).\n` +
+      `2. Get this persona's assigned model command: \`node ${POOL} cmd --id ${model} --role brainstorm ` +
+      `--file ${pf} --out ${out}\`. It prints {id, command}.\n` +
+      `3. Run that command EXACTLY as printed. It is READ-ONLY (may read repo files to ground itself, edits ` +
+      `nothing). Read ONLY the tail of ${out}.\n` +
+      `4. Record: \`node ${POOL} record --role brainstorm --model ${model} --available <true|false>\`.\n` +
+      `5. If it produced the persona's contribution → return { text:<the model's full response, verbatim>, ` +
+      `model:"${model}" }. If it could NOT run (connection lost / exceeded max retries / out of quota / auth / ` +
+      `empty output) → record --available false and return { text:"(no model available to speak this turn)", ` +
+      `model:"none" }.` +
       `\n\n--- MEETING PROMPT (write this verbatim to ${pf}) ---\n${full}`,
     { label, phase: phaseLabel, schema: SPEAK }
   )
@@ -142,7 +143,20 @@ const cast = await agent(
 const personas = (cast.personas || []).slice(0, maxPersonas)
 if (personas.length < 2) throw new Error('chair cast fewer than 2 personas — cannot hold a debate')
 const centralQuestion = cast.centralQuestion
-log(`Cast ${personas.length} personas (Cursor agent, auto-routed); Q: ${centralQuestion}`)
+
+// Assign a DISTINCT model to each persona: round-robin over pool.mjs's ordered id list (warmup/value
+// aware) so consecutive seats get different minds, wrapping if there are more personas than models.
+const LIST = { type: 'object', additionalProperties: false, required: ['ids'], properties: { ids: { type: 'array', items: { type: 'string' } } } }
+const poolIds = await agent(
+  `Run this ONE command from the repo root and return its parsed output, nothing else:\n  node ${POOL} list --role brainstorm\n` +
+    `It prints {ids:[...]}. Return { ids:<that array> }.`,
+  { label: 'pool-ids', phase: 'Cast', schema: LIST }
+)
+const ids = poolIds?.ids?.length ? poolIds.ids : ['cursor']
+personas.forEach((p, i) => {
+  p.model = ids[i % ids.length]
+})
+log(`Cast ${personas.length} personas across models [${personas.map((p) => `${p.name}:${p.model}`).join(', ')}]; Q: ${centralQuestion}`)
 
 // ---- 2. Open: each persona states an opening position (parallel), chair synthesizes ----
 phase('Open')
@@ -155,7 +169,8 @@ const openings = await parallel(
         `This is the OPENING round. State your initial position: where you stand on the central question, your reasoning, ` +
         `and the considerations that matter most from your viewpoint.`,
       `open-${p.name}`,
-      'Open'
+      'Open',
+      p.model
     )
   )
 )
@@ -183,7 +198,8 @@ while (!synth.converged && round <= maxRounds) {
           `Respond to the others. Where do you agree, where do you push back (name who and why), and what do you add or ` +
           `revise? Push the room toward CONCRETE decisions on the open questions. Do not repeat your earlier turn — move it forward.`,
         `debate${round}-${p.name}`,
-        'Debate'
+        'Debate',
+        p.model
       )
     )
   )
@@ -223,7 +239,8 @@ const objections = await parallel(
         `As your persona, give a final check: list any OBJECTIONS, factual errors, or important points it MISSED or ` +
         `misrepresented from your viewpoint. If it fairly captures your position, say so in one line.`,
       `obj-${p.name}`,
-      'Objections'
+      'Objections',
+      p.model
     )
   )
 )
@@ -246,7 +263,7 @@ const result = await agent(
 return {
   briefPath,
   centralQuestion,
-  personas: personas.map((p) => `${p.name} (${p.role})`),
+  personas: personas.map((p) => `${p.name} (${p.role}) — ${p.model}`),
   rounds: round,
   summary: result?.summary || '',
 }

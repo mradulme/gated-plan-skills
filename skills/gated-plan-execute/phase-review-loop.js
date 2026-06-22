@@ -1,6 +1,6 @@
 export const meta = {
   name: 'phase-review-loop',
-  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to the Cursor agent CLI (headless -p --force: auto-routed model, Cursor codebase index, writes + commits), gate each commit on a review loop, then gate the whole branch vs main — review is a separate read-only pass (agent -p --trust: investigates via git/reads but applies no edits). When Cursor stalls on an item (fix round >= fallbackAfter) or is unavailable, a Claude Code native subagent takes one direct fix shot and hands back; review stays Cursor-only',
+  description: 'Branch from base, do each checklist item sequentially — each impl/fix delegated to a POOLED model CLI chosen by skills/_shared/pool.mjs (glm/minimax/kimi/codex/cursor, fair-warmup then best value-for-money; write-capable: edits + commits), gate each commit on a review loop, then gate the whole branch vs main — review is a separate read-only pass run by a DIFFERENT pooled model than the last author. Every run is scored to ~/.gated-plan/events.jsonl. When the pool stalls on an item (fix round >= fallbackAfter) or all candidates are unavailable, a Claude Code native subagent (last resort) takes one direct fix shot and hands back',
   whenToUse: 'Invoked by the execute-gated-plan skill to run one phase of a commit-by-commit plan doc with a review gate per commit plus a final branch-vs-main gate',
   phases: [{ title: 'Phase' }],
 }
@@ -10,10 +10,10 @@ export const meta = {
 //   goal?, phaseIntent?,        // bigger-picture context prepended to each item's impl prompt
 //   reviewBase='main',          // the final branch review compares the branch against this
 //   maxRounds=7,                // maxRounds = per-commit rounds; the final branch gate uses BRANCH_MAX
-//   fallbackAfter=3,            // once a fix round reaches this number the Cursor agent is deemed stuck
-//                               // and a Claude Code NATIVE subagent takes one direct fix shot instead
-//                               // (rounds 1..fallbackAfter-1 stay with Cursor); native also steps in
-//                               // immediately whenever Cursor reports unavailable
+//   fallbackAfter=3,            // once a fix round reaches this number the pool is deemed stuck and a
+//                               // Claude Code NATIVE subagent (last resort) takes one direct fix shot
+//                               // instead (rounds 1..fallbackAfter-1 stay with the pool); native also
+//                               // steps in immediately whenever the whole pool reports unavailable
 //   items: [{ label, prompt, gate }]   // gate = the runnable check (lint/typecheck/test) the commit must pass
 // }
 // args may arrive as an object or, depending on the harness, a JSON string — normalize both.
@@ -47,11 +47,12 @@ const BRANCH_MAX = 3 // rounds for the final branch-vs-main gate
 const REVIEW = {
   type: 'object',
   additionalProperties: false,
-  required: ['p1', 'p2', 'summary'],
+  required: ['p1', 'p2', 'summary', 'model'],
   properties: {
     p1: { type: 'array', items: { type: 'string' } },
     p2: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
+    model: { type: 'string' },
   },
 }
 const GATE = {
@@ -64,23 +65,14 @@ const GATE = {
   },
 }
 
-// Backend: Cursor's `agent` CLI, headless. ONE binary for both roles — impl/fix run it WRITE-capable
-// (-p --force: Cursor auto-routes a model, edits files, and makes the git commit), review runs it
-// READ-ONLY (-p --trust: it investigates via git/reads but, with no --force, edits are only proposed,
-// never applied — our read-only enforcement). No -m/--model: Cursor auto-routes and uses its codebase
-// index for context. --output-format defaults to text (final answer only) so there is no --json
-// event-stream bloat; we still redirect to a temp file and tail it. Absolute path: the shell doesn't
-// source ~/.zshrc. --trust is required even read-only — headless aborts on an untrusted workspace.
-const AGENT = '/Users/mradul/.local/bin/agent'
-
-// WRITE/ACT: feed <taskfile> to the agent as its prompt, redirect to <out> and tail it. "$(cat ...)"
-// passes arbitrary task text (backticks/$/quotes/newlines) as one arg the shell does not re-interpret.
-const implCmd = (taskfile, out) =>
-  `${AGENT} -p --force "$(cat ${taskfile})" > ${out} 2>&1; tail -n 120 ${out}`
-// READ-ONLY (review): -p --trust lets it investigate (git, reads) but, with no --force, edits stay
-// proposed-only. <prompt> is backtick/$/quote-free (see `p` below) so it embeds safely.
-const reviewCmd = (prompt, out) =>
-  `${AGENT} -p --trust "${prompt}" > ${out} 2>&1; tail -n 120 ${out}`
+// Backend: a POOL of model CLIs, routed by skills/_shared/pool.mjs (the on-disk source of truth — the
+// Workflow sandbox has no fs/require, so the agent() subagents below shell out to it). For each task it
+// prints an ordered candidate list {id, command}: the subagent runs the first, falls through to the
+// next on unavailability, then records the outcome. impl/fix get WRITE-capable commands (edit + commit),
+// review gets READ-ONLY commands (investigate via git/reads, no edits). claude is NOT in the pool — it is
+// the native last resort (nativeFix) so it can never skew the value rankings. Absolute path: the shell
+// doesn't source ~/.zshrc, and pool.mjs emits absolute/ config-dir invocations for the same reason.
+const POOL = '/Users/mradul/git/gated-plan-skills/skills/_shared/pool.mjs'
 
 const DELEGATE = {
   type: 'object',
@@ -93,34 +85,38 @@ const DELEGATE = {
   },
 }
 
-// Delegate ONE implementation/fix task to the Cursor agent CLI (headless, write-capable). It writes the
-// task to a temp file (safe quoting), runs the single agent command, and reports back. A run that
-// completes — commit or not — is the agent's turn; the gate/fix loop handles a no-commit run.
-const delegate = (task, label) => {
+// Delegate ONE implementation/fix task to a POOLED write-capable model CLI. The subagent writes the task
+// to a temp file (safe quoting), asks pool.mjs to route, runs the chosen command (falling through to the
+// next candidate if one is unavailable), records the outcome, and reports back. A run that completes —
+// commit or not — is that model's turn; the gate/fix loop handles a no-commit run. `role` is implement
+// or fix (both 'code' bucket); `exclude` keeps a model out of contention if the caller wants to.
+const delegate = (task, label, role = 'implement', exclude = []) => {
   const slug = label.replace(/[^a-z0-9]+/gi, '-')
   const taskfile = `/tmp/gpe-task-${slug}.txt`
   const out = `/tmp/gpe-out-${slug}.txt`
+  const ex = exclude.length ? ` --exclude ${exclude.join(',')}` : ''
   return agent(
-    `You are delegating ONE implementation/fix task on git branch \`${branch}\` to the Cursor agent CLI — ` +
-      `do NOT do the coding yourself. First write the task (given at the END of this message) VERBATIM to ` +
-      `${taskfile} using the Write tool, so backticks/$/quotes/newlines are preserved exactly. Then run this ` +
-      `command EXACTLY as written (absolute path — the shell does not source ~/.zshrc), with Bash timeout ` +
-      `600000 ms. It is agentic and WRITE-CAPABLE (-p --force: Cursor auto-routes a model, edits files, and ` +
-      `makes the git commit itself). Output is the final answer only — read ONLY the tail; do NOT pass --json.\n\n` +
-      `  ${implCmd(taskfile, out)}\n\n` +
-      `Then decide:\n` +
-      `• It completed AND left a NEW commit at HEAD (verify with git log --oneline -1 / that HEAD advanced) → ` +
-      `return { committed:true, model:"cursor-agent", detail:<short summary + commit subject> }.\n` +
-      `• It RAN but left NO new commit → return { committed:false, model:"cursor-agent", detail:<tail> } ` +
-      `(the gate/fix loop handles it).\n` +
-      `• It could NOT run — connection lost / "exceeded max retries" / out of quota / auth error → ` +
-      `return { committed:false, model:"none", detail:"agent unavailable: <reason> — item left for retry" }.` +
+    `You are delegating ONE ${role} task on git branch \`${branch}\` to a pooled model CLI — do NOT code it ` +
+      `yourself. Work these steps, each with Bash timeout 600000 ms (absolute paths — the shell does not source ~/.zshrc):\n` +
+      `1. Write the task (given at the END, after the marker) VERBATIM to ${taskfile} with the Write tool ` +
+      `(preserve backticks/$/quotes/newlines).\n` +
+      `2. Route: \`node ${POOL} route --role ${role} --file ${taskfile} --out ${out}${ex}\`. It prints ` +
+      `{candidates:[{id,command},...]} ordered best-first.\n` +
+      `3. Run candidates[0].command EXACTLY as printed. It is WRITE-CAPABLE (edits files + makes the git commit). ` +
+      `Read ONLY the tail of ${out}. If it reports UNAVAILABLE (connection lost / exceeded max retries / out of ` +
+      `quota / auth error / empty output), run the NEXT candidate's command instead, and so on. If EVERY candidate ` +
+      `is unavailable, the model is "none".\n` +
+      `4. Record: \`node ${POOL} record --role ${role} --model <id-that-ran> --available <true|false> ` +
+      `--committed <true|false>\` (available=false only if all candidates were unavailable; committed=true iff a ` +
+      `NEW commit is at HEAD — verify git log --oneline -1 / that HEAD advanced).\n` +
+      `5. Return { committed, model:<id-that-ran, or "none" if all unavailable>, detail:<short summary + commit ` +
+      `subject, or the failure reason> }.` +
       `\n\n--- TASK (write this verbatim to ${taskfile}) ---\n${task}`,
     { label, phase: phaseTitle, schema: DELEGATE }
   )
 }
 
-// Shared coding discipline — used by both the Cursor impl task and the native-Claude fallback so the
+// Shared coding discipline — used by both the pooled impl task and the native-Claude fallback so the
 // two solvers can't drift. Same diff philosophy, safety floor, and UI-quality bar for either author.
 const DISCIPLINE =
   `Follow repo conventions (TDD where adding behavior). Be lazy in the disciplined sense: write the ` +
@@ -141,74 +137,95 @@ const implTask = (item) =>
   `(run the specific check it names — the project's lint/typecheck/test command), \`git add\` + \`git commit\` ` +
   `with a conventional message + the repo's Co-Authored-By trailer. If already satisfied, make no commit.`
 
-// NATIVE fallback solver: a Claude Code subagent that does the coding ITSELF (Edit/Write/Bash) — NO
-// `agent` CLI call. Used when Cursor has stalled on an item (round >= fallbackAfter) or is unavailable.
-// It lacks Cursor's prebuilt codebase index, so the handed-in <task> must already carry the gate output
-// / review blockers (it does — every fix call site embeds them). Returns the SAME DELEGATE schema as
-// `delegate` so call sites are uniform. ONE focused attempt, then it hands back to the loop (which
-// re-runs the gate and the Cursor review next round) — it must NOT loop internally.
+// NATIVE fallback solver (last resort): a Claude Code subagent that does the coding ITSELF
+// (Edit/Write/Bash) — NO pool/CLI call. Used when the pool has stalled on an item (round >=
+// fallbackAfter) or the whole pool is unavailable. It lacks a prebuilt codebase index, so the handed-in
+// <task> must already carry the gate output / review blockers (it does — every fix call site embeds
+// them). Returns the SAME DELEGATE schema as `delegate` so call sites are uniform. ONE focused attempt,
+// then it hands back to the loop (which re-runs the gate and a pooled review next round) — no internal loop.
 const nativeFix = (task, label) =>
   agent(
-    `The Cursor agent CLI has been unable to resolve this on git branch \`${branch}\`, so YOU are the ` +
-      `fallback solver: implement the fix DIRECTLY with your own Edit/Write/Bash tools — do NOT invoke the ` +
-      `\`agent\` CLI. You do not have Cursor's codebase index, so read the files named in the task yourself. ` +
-      `Make exactly ONE focused fix attempt — do not loop. ${DISCIPLINE} Then re-run the item's gate and, ` +
-      `only if it is green, \`git add\` + \`git commit\` with a conventional message + the repo's ` +
-      `Co-Authored-By trailer. Report { committed (did HEAD advance with a new commit?), ` +
-      `model:"claude-native", detail:<short summary + commit subject, or why no commit> }.` +
+    `The pooled model CLIs have been unable to resolve this on git branch \`${branch}\`, so YOU are the ` +
+      `LAST-RESORT fallback solver: implement the fix DIRECTLY with your own Edit/Write/Bash tools — do NOT ` +
+      `route through pool.mjs or any model CLI. You do not have a prebuilt codebase index, so read the files ` +
+      `named in the task yourself. Make exactly ONE focused fix attempt — do not loop. ${DISCIPLINE} Then ` +
+      `re-run the item's gate and, only if it is green, \`git add\` + \`git commit\` with a conventional ` +
+      `message + the repo's Co-Authored-By trailer. Finally record it: ` +
+      `\`node ${POOL} record --role fix --model claude-native --available true --committed <true|false>\`. ` +
+      `Report { committed (did HEAD advance with a new commit?), model:"claude-native", ` +
+      `detail:<short summary + commit subject, or why no commit> }.` +
       `\n\n--- TASK ---\n${task}`,
     { label: `native-${label}`, phase: phaseTitle, schema: DELEGATE }
   )
 
-// Route ONE fix attempt to the right solver. Cursor is primary; the Claude native fallback takes a
-// single shot when the item is stuck (round >= fallbackAfter) or when Cursor is unavailable. Either
-// way it is one attempt handed back to the loop, which re-gates and re-reviews next round.
+// Route ONE fix attempt to the right solver. The pool is primary; the Claude native fallback (last
+// resort) takes a single shot when the item is stuck (round >= fallbackAfter) or when the whole pool is
+// unavailable. Either way it is one attempt handed back to the loop, which re-gates and re-reviews next
+// round. Returns the DELEGATE result so the caller can track who last authored the code.
 const fixAttempt = async (task, label, round) => {
   if (round >= fallbackAfter) {
-    log(`↯ ${label}: Cursor stuck at round ${round} — native Claude fallback (one shot)`)
+    log(`↯ ${label}: pool stuck at round ${round} — native Claude fallback (one shot)`)
     return nativeFix(task, label)
   }
-  const r = await delegate(task, label)
+  const r = await delegate(task, label, 'fix')
   if (r?.model === 'none') {
-    log(`↯ ${label}: Cursor agent unavailable — native Claude fallback (one shot)`)
+    log(`↯ ${label}: whole model pool unavailable — native Claude fallback (one shot)`)
     return nativeFix(task, label)
   }
   return r
 }
 
-// The reviewer is a SEPARATE read-only pass over the diff (the Cursor agent run with no --force, so it
-// can investigate but not apply edits). Not the same invocation that wrote the code; one reviewer per review.
-const reviewAgent = (target, label) => {
+// The reviewer is a SEPARATE read-only pass over the diff, run by a POOLED model — and `exclude` keeps
+// it from being whoever last authored the code, so implementer ≠ reviewer holds even after fixes.
+const reviewAgent = (target, label, exclude = []) => {
   const scopeMd =
     target === 'branch'
       ? `this branch vs \`${reviewBase}\` (the changes in \`git diff ${reviewBase}...HEAD\`)`
       : `the latest commit (the changes in \`git diff HEAD~1 HEAD\`)`
   const ref = target === 'branch' ? `${reviewBase}...HEAD` : 'HEAD~1 HEAD'
-  // Unique per-review temp path so concurrent plan runs can't cross-read each other's output
+  // Unique per-review temp paths so concurrent plan runs can't cross-read each other's output
   // (a stale/partial read could otherwise look like a clean review). slug from the review label.
   const slug = label.replace(/[^a-z0-9]+/gi, '-')
+  const pf = `/tmp/gpe-rev-${slug}.txt`
   const out = `/tmp/gpe-${slug}.txt`
-  // Agentic review instruction. NOTE: kept free of backticks, $ and double-quotes so it embeds safely
-  // inside the double-quoted shell arg below (no command substitution).
+  const ex = exclude.length ? ` --exclude ${exclude.join(',')}` : ''
+  // Review instruction handed to the pooled reviewer (file-fed via "$(cat ...)", so backticks/$ are fine).
   const p =
     `Review ${target === 'branch' ? `this branch against ${reviewBase}` : 'the latest commit'} for ` +
     `correctness. Run git (e.g. git diff ${ref}) and read the surrounding code as needed — investigate, ` +
     `do not just skim. List P1 (must-fix: bug, regression, security, data loss) and P2 (correctness risk, ` +
     `missing edge case) issues with file:line. Ignore style/nits. Make NO edits.`
   return agent(
-    `On branch \`${branch}\`, review ${scopeMd}. Run this command EXACTLY as written (absolute path — the ` +
-      `shell does not source ~/.zshrc), with Bash timeout 600000 ms, then WAIT for it to finish:\n\n` +
-      `  ${reviewCmd(p, out)}\n\n` +
-      `It is the Cursor agent headless and READ-ONLY (-p --trust, no --force: it investigates via git/reads ` +
-      `but cannot apply edits). It auto-routes a model and uses Cursor's codebase index — let it explore; do ` +
-      `not pre-dump the diff. Output is the final answer only — read ONLY the tail; do NOT use --json. ` +
-      `Classify into P1 (must-fix: real bug, regression, security, data loss, broken gate) and P2 (should-fix: ` +
-      `correctness risk, missing edge case). Ignore P3/nits/style. Edit nothing. If the agent could NOT run ` +
-      `(connection lost / "exceeded max retries" / out of quota / auth) and produced no review, do NOT return ` +
-      `an empty/clean result (empty p1/p2 reads as a clean pass) — return a single P1 "NO REVIEWER AVAILABLE: ` +
-      `agent unavailable — code is UNREVIEWED, do not merge" so it surfaces as a blocker. Otherwise return the ` +
-      `structured result.`,
+    `On branch \`${branch}\`, review ${scopeMd} using a pooled READ-ONLY model. Steps, each Bash timeout ` +
+      `600000 ms (absolute paths — the shell does not source ~/.zshrc):\n` +
+      `1. Write the review instruction (given at the END, after the marker) VERBATIM to ${pf} with the Write tool.\n` +
+      `2. Route a reviewer DIFFERENT from the implementer: \`node ${POOL} route --role review --file ${pf} ` +
+      `--out ${out}${ex}\`. It prints {candidates:[{id,command},...]} ordered best-first.\n` +
+      `3. Run candidates[0].command EXACTLY as printed; WAIT for it to finish. It is READ-ONLY (investigates ` +
+      `via git/reads, applies no edits). Read ONLY the tail of ${out}. If it reports UNAVAILABLE (connection ` +
+      `lost / exceeded max retries / out of quota / auth / empty output), run the NEXT candidate instead.\n` +
+      `4. Record: \`node ${POOL} record --role review --model <id-that-ran> --available <true|false> ` +
+      `--p1 <count> --p2 <count>\`.\n` +
+      `5. Classify P1 (must-fix: real bug, regression, security, data loss, broken gate) and P2 (should-fix: ` +
+      `correctness risk, missing edge case). Ignore P3/nits/style. If EVERY candidate was unavailable and no ` +
+      `review was produced, do NOT return empty p1/p2 (an empty result reads as a clean pass) — record ` +
+      `--available false and return a single P1 "NO REVIEWER AVAILABLE: code is UNREVIEWED, do not merge". ` +
+      `Return { p1, p2, summary, model:<id-that-ran, or "none"> }.` +
+      `\n\n--- REVIEW INSTRUCTION (write this verbatim to ${pf}) ---\n${p}`,
     { label, phase: phaseTitle, schema: REVIEW }
+  )
+}
+
+// Record ONE quality datapoint via pool.mjs (rounds-to-clean is the key "how good was the first cut"
+// signal, attributed to the initial implementer). A tiny dedicated subagent — the Workflow sandbox can't
+// touch the filesystem itself. Skipped for an unknown/none author (nothing meaningful to score).
+const REC = { type: 'object', additionalProperties: false, required: ['done'], properties: { done: { type: 'boolean' } } }
+const recordOutcome = (model, fields, label) => {
+  if (!model || model === 'none') return Promise.resolve({ done: false })
+  return agent(
+    `From the repo root, run this ONE command and nothing else, then return {done:true}:\n` +
+      `  node ${POOL} record --role implement --model ${model} ${fields}`,
+    { label: `rec:${label}`, phase: phaseTitle, schema: REC }
   )
 }
 
@@ -220,14 +237,21 @@ await agent(
 )
 
 const unresolved = []
+// Who last authored code on the branch — the reviewer is always routed to a DIFFERENT model so
+// implementer ≠ reviewer holds even after fixes. Persists across items into the final branch gate.
+let lastAuthor = ''
 
 for (const item of items) {
   let impl = await delegate(implTask(item), `impl:${item.label}`)
   if (impl?.model === 'none') {
-    log(`↯ ${item.label}: Cursor agent unavailable for initial impl — native Claude fallback`)
+    log(`↯ ${item.label}: whole model pool unavailable for initial impl — native Claude fallback`)
     impl = await nativeFix(implTask(item), `impl:${item.label}`)
   }
   if (!impl?.committed) log(`⚠ ${item.label}: impl agent left no commit — ${impl?.detail || 'unknown'} (gate will catch it)`)
+  // The initial implementer carries the rounds-to-clean quality score; lastAuthor tracks the most
+  // recent code author for reviewer exclusion (the native fallback authors as "claude-native").
+  const implementer = impl?.model && impl.model !== 'none' ? impl.model : 'claude-native'
+  lastAuthor = implementer
 
   let round = 0
   let blockers = []
@@ -247,33 +271,41 @@ for (const item of items) {
       if (!g?.pass) {
         gateRed = true
         log(`✗ ${item.label}: gate RED round ${round} — fixing before review`)
-        await fixAttempt(
+        const gf = await fixAttempt(
           `On branch \`${branch}\`, the gate for "${item.label}" is RED:\n\n${g?.detail || 'gate command failed'}\n\n` +
             `Fix the code so the gate (${item.gate}) passes green — no suppression, no skipping tests — then commit. Change only what's needed.`,
           `gatefix:${item.label}#${round}`,
           round
         )
+        if (gf?.model && gf.model !== 'none') lastAuthor = gf.model
         continue // re-verify the gate next round; review does not run on a red gate
       }
       gateRed = false
     }
 
-    const review = await reviewAgent('commit', `review:${item.label}#${round}`)
+    const review = await reviewAgent('commit', `review:${item.label}#${round}`, [lastAuthor])
     blockers = [...(review?.p1 || []), ...(review?.p2 || [])]
     if (!blockers.length) {
-      log(`✓ ${item.label}: gate green + review clean (round ${round})`)
+      log(`✓ ${item.label}: gate green + review clean (round ${round}) — impl by ${implementer}`)
+      await recordOutcome(implementer, `--available true --committed true --rounds ${round} --stuck false`, `clean:${item.label}`)
       break
     }
     log(`↻ ${item.label}: ${blockers.length} blocker(s) round ${round} — fixing`)
-    await fixAttempt(
+    const rf = await fixAttempt(
       `On branch \`${branch}\`, the review flagged these on "${item.label}". Fix ALL properly (no suppression), re-run the item's gate green, then commit:\n\n` +
         blockers.map((b, i) => `${i + 1}. ${b}`).join('\n'),
       `fix:${item.label}#${round}`,
       round
     )
+    if (rf?.model && rf.model !== 'none') lastAuthor = rf.model
   }
-  if (gateRed) unresolved.push({ item: item.label, blockers: [`gate never green within ${maxRounds} rounds: ${item.gate}`] })
-  else if (blockers.length) unresolved.push({ item: item.label, blockers })
+  if (gateRed || blockers.length) {
+    // Item never went clean — score the implementer's first cut as stuck so a model that repeatedly
+    // can't be brought green is penalised, not silently dropped.
+    await recordOutcome(implementer, `--available true --committed ${!!impl?.committed} --rounds ${maxRounds} --stuck true`, `stuck:${item.label}`)
+    if (gateRed) unresolved.push({ item: item.label, blockers: [`gate never green within ${maxRounds} rounds: ${item.gate}`] })
+    else unresolved.push({ item: item.label, blockers })
+  }
 }
 
 // Final gate: review the WHOLE branch against reviewBase to catch cross-commit interactions the
@@ -283,7 +315,7 @@ let branchBlockers = []
   let round = 0
   while (round < BRANCH_MAX) {
     round++
-    const review = await reviewAgent('branch', `branch-review#${round}`)
+    const review = await reviewAgent('branch', `branch-review#${round}`, [lastAuthor])
     branchBlockers = [...(review?.p1 || []), ...(review?.p2 || [])]
     if (!branchBlockers.length) {
       log(`✓ branch ${branch}: clean vs ${reviewBase} (round ${round})`)
@@ -291,14 +323,15 @@ let branchBlockers = []
     }
     log(`↻ branch ${branch}: ${branchBlockers.length} blocker(s) round ${round} — fixing`)
     // Only BRANCH_MAX (3) rounds here, so the round-based threshold rarely trips on its own; engage the
-    // native fallback on the LAST branch round (or on Cursor unavailability, handled inside fixAttempt).
-    await fixAttempt(
+    // native fallback on the LAST branch round (or on whole-pool unavailability, handled in fixAttempt).
+    const bf = await fixAttempt(
       `On branch \`${branch}\`, the full-branch review vs \`${reviewBase}\` flagged these. Fix ALL properly (no suppression), ` +
         `re-run the affected gates green, then commit:\n\n` +
         branchBlockers.map((b, i) => `${i + 1}. ${b}`).join('\n'),
       `branchfix#${round}`,
       round === BRANCH_MAX ? fallbackAfter : 0
     )
+    if (bf?.model && bf.model !== 'none') lastAuthor = bf.model
   }
 }
 
