@@ -38,6 +38,15 @@ it phase-by-phase.
    Pass `gate` as its own field too — the workflow re-runs it on HEAD as a **hard precondition**
    each round and only spawns the reviewer once it's green (see below). Skip items already `done: true`.
 
+   **Pre-flight: ignore the scratch dir locally.** The delegated model commits with `git add`, so
+   keep the skills' `.gated-plan-tmp/` handoff dir out of staging in the target repo (idempotent —
+   writes to the local, uncommitted `.git/info/exclude`, never the tracked `.gitignore`):
+
+   ```
+   grep -qxF '.gated-plan-tmp/' "$(git rev-parse --git-dir)/info/exclude" 2>/dev/null \
+     || echo '.gated-plan-tmp/' >> "$(git rev-parse --git-dir)/info/exclude"
+   ```
+
 4. **Run the phase** via the bundled workflow (this is the explicit opt-in to call `Workflow`).
    Pass `args` as an actual JSON object, not a string:
 

@@ -53,8 +53,14 @@ You ask it for the command, run it, then record the outcome so the scoreboard st
    expected output. For read-only roles, tell it to reason and report (no edits). For write roles, name
    the files in scope and the done condition.
    ```
-   F=/tmp/delegate-prompt.txt   # write your prompt here (Write tool or heredoc)
-   OUT=/tmp/delegate-out.txt
+   F=.gated-plan-tmp/delegate-prompt.txt   # write your prompt here (Write tool or heredoc)
+   OUT=.gated-plan-tmp/delegate-out.txt
+   ```
+   For a **write** role (it may `git add` + commit), first keep this scratch dir out of staging —
+   idempotent, writes the local `.git/info/exclude`, not the tracked `.gitignore`:
+   ```
+   grep -qxF '.gated-plan-tmp/' "$(git rev-parse --git-dir)/info/exclude" 2>/dev/null \
+     || echo '.gated-plan-tmp/' >> "$(git rev-parse --git-dir)/info/exclude"
    ```
 
 4. **Get the command from the pool** (absolute path — the shell does NOT source `~/.zshrc`):

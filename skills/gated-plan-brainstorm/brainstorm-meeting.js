@@ -99,8 +99,8 @@ const renderSynth = (s) => {
 // participation/availability per model feeds the same scoreboard as impl/review.
 const speak = (persona, body, label, phaseLabel, model) => {
   const lslug = label.replace(/[^a-z0-9]+/gi, '-')
-  const pf = `/tmp/gpb-prompt-${lslug}.txt`
-  const out = `/tmp/gpb-out-${lslug}.txt`
+  const pf = `.gated-plan-tmp/gpb-prompt-${lslug}.txt`
+  const out = `.gated-plan-tmp/gpb-out-${lslug}.txt`
   const full =
     `You are a participant in a live design brainstorm meeting. Stay FULLY in character as this persona and ` +
     `argue from its viewpoint — do not be a neutral assistant:\n\n${persona}\n\n${body}\n\n` +

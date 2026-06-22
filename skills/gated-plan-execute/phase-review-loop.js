@@ -95,8 +95,8 @@ const DELEGATE = {
 // or fix (both 'code' bucket); `exclude` keeps a model out of contention if the caller wants to.
 const delegate = (task, label, role = 'implement', exclude = []) => {
   const slug = label.replace(/[^a-z0-9]+/gi, '-')
-  const taskfile = `/tmp/gpe-task-${slug}.txt`
-  const out = `/tmp/gpe-out-${slug}.txt`
+  const taskfile = `.gated-plan-tmp/gpe-task-${slug}.txt`
+  const out = `.gated-plan-tmp/gpe-out-${slug}.txt`
   const ex = exclude.length ? ` --exclude ${exclude.join(',')}` : ''
   return agent(
     `You are delegating ONE ${role} task on git branch \`${branch}\` to a pooled model CLI — do NOT code it ` +
@@ -193,8 +193,8 @@ const reviewAgent = (target, label, exclude = []) => {
   // Unique per-review temp paths so concurrent plan runs can't cross-read each other's output
   // (a stale/partial read could otherwise look like a clean review). slug from the review label.
   const slug = label.replace(/[^a-z0-9]+/gi, '-')
-  const pf = `/tmp/gpe-rev-${slug}.txt`
-  const out = `/tmp/gpe-${slug}.txt`
+  const pf = `.gated-plan-tmp/gpe-rev-${slug}.txt`
+  const out = `.gated-plan-tmp/gpe-${slug}.txt`
   const ex = exclude.length ? ` --exclude ${exclude.join(',')}` : ''
   // Review instruction handed to the pooled reviewer (file-fed via "$(cat ...)", so backticks/$ are fine).
   const p =
