@@ -5,7 +5,7 @@ description: Turn a task/spec into a commit-level plan YAML that `gated-plan-exe
 
 # gated-plan-create
 
-Produce a `docs/plans/<name>.yaml` whose every item is **one self-contained, independently-green
+Produce a `docs/plans/open/<name>.yaml` whose every item is **one self-contained, independently-green
 commit**, grouped into phases, each item naming the gate that proves it done. The output is the
 exact contract `gated-plan-execute` reads, so the two compose: create → execute.
 
@@ -66,8 +66,9 @@ exact contract `gated-plan-execute` reads, so the two compose: create → execut
    don't defer to it, don't paste its output into the plan verbatim. If every candidate is unavailable
    (connection/quota/auth), just skip it and decide yourself. The pool is preconfigured — never set keys/models.
 
-5. **Write the YAML** in the schema below to `docs/plans/<kebab-name>.yaml`. Then tell the user to
-   run `gated-plan-execute docs/plans/<file>.yaml`. Don't start implementing — this skill only plans.
+5. **Write the YAML** in the schema below to `docs/plans/open/<kebab-name>.yaml` (create the
+   `docs/plans/open/` directory if it doesn't exist). Then tell the user to
+   run `gated-plan-execute docs/plans/open/<file>.yaml`. Don't start implementing — this skill only plans.
 
 ## YAML schema (what `gated-plan-execute` parses)
 
