@@ -105,7 +105,7 @@ const REGISTRY = [
 
 // Map a fine-grained role to a routing bucket. Buckets accumulate samples faster than fine roles and
 // decide eligibility: code = write-capable; review/advise = read-only.
-const BUCKET = { implement: 'code', fix: 'code', gatefix: 'code', review: 'review', 'branch-review': 'review', brainstorm: 'advise', advisory: 'advise' }
+const BUCKET = { implement: 'code', fix: 'code', gatefix: 'code', review: 'review', 'branch-review': 'review', brainstorm: 'advise', advisory: 'advise', research: 'advise' }
 const bucketOf = (role) => BUCKET[role] || 'code'
 const needsWrite = (role) => bucketOf(role) === 'code'
 

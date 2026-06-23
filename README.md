@@ -3,7 +3,7 @@
 Three composing [Claude Code](https://claude.com/claude-code) skills for shipping work as a series of
 small, independently-verifiable commits — each one **gated by an AI code-review loop** — and, before
 that, for deciding *what the work even is*. All the model work — implementation, fixes, review, and
-brainstorm personas — is routed across a **pool of model CLIs** (GLM 5.2, MiniMax M3, Kimi 2.7,
+brainstorm/research personas — is routed across a **pool of model CLIs** (GLM 5.2, MiniMax M3, Kimi 2.7,
 GPT 5.5/codex, and the Cursor agent) by a shared router that gives every model fair chances, then
 favours the best **value-for-money** per task type, scoring each run to a central scoreboard. Claude
 (Opus/Sonnet) is the **native last resort** only — kept out of the pool so it never skews rankings.
@@ -11,12 +11,15 @@ favours the best **value-for-money** per task type, scoring each run to a centra
 | Skill | Invoke | Does |
 |---|---|---|
 | `gated-plan-brainstorm` | `/gated-plan-brainstorm <topic>` | Runs a simulated design meeting on a subjective, open-ended topic: a chair casts a roster of deliberately-clashing personas (**each voiced by a different pooled model** — distinct minds clash, not one model role-playing all) and drives them through opening positions → debate rounds → convergence → an objections pass, then writes a decision brief to `docs/brainstorms/<topic>.md`. |
+| `gated-plan-research` | `/gated-plan-research <surface>` | Runs a simulated user-research panel on an **existing** product: a lead researcher recruits user personas (**each with a JTBD + pain points, each voiced by a different pooled model**, read-only) who **independently** walk the product through their jobs, then clusters findings by **prevalence × severity** into a prioritized **cut / keep / improve** report at `docs/research/<surface>.md`. The pooled models inspect source read-only (can't run the app), so snappiness/aesthetics are inferred hypotheses flagged for real-user validation. |
 | `gated-plan-create` | `/gated-plan-create <task>` | Measures the real work, splits it into commit-sized items grouped into phases (each item names its verification gate), and writes a plan to `docs/plans/<name>.yaml`. Takes a brainstorm brief or a raw task as input. |
 | `gated-plan-execute` | `/gated-plan-execute <doc>` | Branches per phase from a base, does each item **sequentially** (one commit each) — each item's impl/fix **delegated to a pooled write-capable model** (edits + commits) — reviewed by a separate read-only pass run by a **different** pooled model (implementer ≠ reviewer) that loops fix→recommit→re-review until the commit is clean, then runs one final review of the whole branch vs `main`. |
 | `delegate` | `/delegate <task>` | Ad-hoc hand-off of one isolated piece of work to a pooled model CLI (or a native Claude subagent) when it improves cost/speed/quality — read-only for investigation/review/critique/debugging, write only for clearly-scoped implementation. Same pool and scoreboard as `gated-plan-execute`, but driven on demand instead of from a plan: gets the exact invocation from `pool.mjs`, runs it, and records the outcome to the central scoreboard. |
 
 They compose: **brainstorm → create → execute**. `brainstorm` is optional — start there when the
-direction is still subjective; skip straight to `create` when the work is already concrete. The
+direction is still subjective; skip straight to `create` when the work is already concrete.
+`gated-plan-research` is a parallel front-end — start there to gather simulated user feedback on an
+*existing* product into a cut/keep/improve report `create` can read. The
 coupling is light: `brainstorm` writes a markdown brief that `create` reads, and `create` emits
 exactly the YAML schema `execute` parses (`phases[]` of `items[]`; each item a unique `id`, a `do`
 scope, a `gate`, and a `done` flag).
@@ -56,6 +59,7 @@ scope, a `gate`, and a `done` flag).
 ```
 git clone https://github.com/mradulme/gated-plan-skills.git
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-brainstorm" ~/.claude/skills/gated-plan-brainstorm
+ln -s "$PWD/gated-plan-skills/skills/gated-plan-research"   ~/.claude/skills/gated-plan-research
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-create"     ~/.claude/skills/gated-plan-create
 ln -s "$PWD/gated-plan-skills/skills/gated-plan-execute"    ~/.claude/skills/gated-plan-execute
 ln -s "$PWD/gated-plan-skills/skills/delegate"             ~/.claude/skills/delegate
@@ -68,6 +72,9 @@ Skills load at session start — start a fresh Claude Code session after install
 ```
 /gated-plan-brainstorm should we split the auth service out of the monolith?
 #   → runs the meeting, writes docs/brainstorms/<topic>.md (skip this step if the work is already concrete)
+
+/gated-plan-research the onboarding flow
+#   → runs the user panel, writes docs/research/<surface>.md (qualitative cut/keep/improve on an existing product)
 
 /gated-plan-create add full test + lint + typecheck coverage to the app
 #   → writes docs/plans/<name>.yaml (can take the brainstorm brief as input)
@@ -108,7 +115,7 @@ control returns to the loop).
 
 The router (`skills/_shared/pool.mjs`) turns the gate/review loop into a **multi-armed bandit over
 coding agents**. It buckets work into three task types — **code** (implement/fix, write-capable),
-**review**, and **advise** (brainstorm/sounding-board) — and for each:
+**review**, and **advise** (brainstorm / research / sounding-board) — and for each:
 
 - **Fair warmup** — until every model has a minimum number of runs in that bucket, it routes to the
   least-sampled model first, so each one earns a real track record before any get favoured.
